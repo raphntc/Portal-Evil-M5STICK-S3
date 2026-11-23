@@ -83,7 +83,7 @@ The display is the same 135×240 panel, so all of the on-screen UI (skull, menus
 - 📋 Operator dashboard at `/admin` — six stat tiles, AP info bar, search filter, configurable auto-refresh.
 - 🔑 Login-protected admin (HTTP Basic Auth; user/password configurable, can be turned off).
 - ⬇️ Export captures as **CSV** (`/export.csv`) or **JSON** (`/export.json`).
-- 🧰 Web settings page (`/settings`) — change SSID, refresh, brightness, beep/LED, and login live, no reflashing.
+- 🧰 Web settings page (`/settings`) — organized into sections (Portal / Display / Audio / Security) with SSID, auto-refresh, brightness, **screen flip 180°**, beep, **speaker volume slider**, LED, and login; a **show-password** toggle; and a read-only **Device status** panel (battery, uptime, free heap, flash used, lifetime captures). All live, no reflashing.
 - 💾 Persistent settings saved to flash (NVS) and restored on boot.
 
 ---
@@ -180,7 +180,7 @@ The build writes to the **`firmware/`** folder:
 ## ⚙️ Configuration
 
 Portal text/branding are `#define` values near the top of
-[`portal-evil-sticks3.ino`](portal-evil-sticks3/portal-evil-sticks3.ino): `SSID_NAME`, `SUBTITLE`, `POST_TITLE`, `POST_BODY`, `ADMIN_USER_DEF`, `ADMIN_PASS_DEF`, `MAX_CAPTURES`, and `LED_PIN` (set to a real GPIO to enable an external capture LED). Runtime settings (beep, brightness, SSID, login, auto-refresh, screen flip) are changed live from the on-device menu or `/settings`, and persisted to flash.
+[`portal-evil-sticks3.ino`](portal-evil-sticks3/portal-evil-sticks3.ino): `SSID_NAME`, `SUBTITLE`, `POST_TITLE`, `POST_BODY`, `ADMIN_USER_DEF`, `ADMIN_PASS_DEF`, `MAX_CAPTURES`, and `LED_PIN` (set to a real GPIO to enable an external capture LED). Runtime settings (beep, speaker volume, brightness, screen flip, SSID, login, auto-refresh) are changed live from the on-device menu or the sectioned `/settings` page, and persisted to flash (NVS). Speaker volume and screen flip are also adjustable from `/settings`.
 
 ---
 

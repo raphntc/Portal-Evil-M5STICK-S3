@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="assets/m5sticks3.svg" alt="M5StickS3 running Portal Evil HUEBR" width="420">
-
 # ⚡ Portal Evil HUEBR — M5StickS3 Edition
 
 ### Educational captive portal (“Evil Portal”) for the **M5StickS3** (ESP32-S3)

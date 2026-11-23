@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/m5sticks3.svg" alt="M5StickS3 running Portal Evil HUEBR" width="420">
+
 # ⚡ Portal Evil HUEBR — M5StickS3 Edition
 
 ### Educational captive portal (“Evil Portal”) for the **M5StickS3** (ESP32-S3)
@@ -76,8 +78,8 @@ The display is the same 135×240 panel, so all of the on-screen UI (skull, menus
 - 🔐 Customizable fake sign-in page; submissions HTML-escaped on capture.
 - 💾 **Captures persisted to flash (LittleFS)** — every submission is appended to a history file on the 8 MB flash and reloaded on boot, so nothing is lost if the battery dies or the device reboots. A 50-entry RAM ring feeds the live LCD/dashboard; the CSV/JSON exports stream the **full** history from flash.
 - ⏳ Animated “validating access” page after submission (pure CSS/JS, works offline).
-- 💀 Laughing-skull boot animation (~5 s), vector-drawn.
-- 🎛️ On-device menu (Tools / Configuration / Exit) with icons and a live status panel; the portal does **not** auto-start.
+- 💀 Laughing-skull boot animation (~5 s), vector-drawn, now with a **real synthesized evil cackle** played through the speaker (falls back to beeps if RAM is tight).
+- 🎛️ **Animated on-device menu** (Tools / Configuration / Exit): gradient header + background, raised cards with drop shadows and bevels (depth), colored icons, a glowing selected row, rows that **slide in** when you open a menu and a **pop** when the highlight moves; plus a live status panel. The portal does **not** auto-start.
 - 🖥️ Live LCD: SSID, admin URL (`http://172.0.0.1/admin`), battery gauge, and victim count.
 - 🔊 Beep feedback on capture/boot via the speaker (toggleable).
 - 📋 Operator dashboard at `/admin` — six stat tiles, AP info bar, search filter, configurable auto-refresh.
@@ -193,6 +195,8 @@ This port was adapted from the C Plus source using M5Stack's M5StickS3 documenta
 - **Button mapping** (BtnA/BtnB ↔ the two physical keys) under M5Unified.
 - **Speaker volume** (`M5.Speaker.setVolume(160)`) — M5Stack recommends ≤ 75 % on battery.
 - **LittleFS mount** — capture persistence needs a flash filesystem partition. The `default_8MB` partition scheme used by the build provides one; confirm `LittleFS.begin(true)` mounts it (it formats on first boot).
+- **Boot laugh** — the synthesized cackle uses `M5.Speaker.playRaw()`; confirm the signature/playback on the device and tweak the `buildLaugh()` parameters to taste.
+- **Menu animation timing** — the slide-in/pop delays (~16–45 ms) are tuned by eye; adjust if they feel sluggish or too fast on real hardware.
 
 ---
 

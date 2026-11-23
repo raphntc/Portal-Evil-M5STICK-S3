@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <LittleFS.h>    // persist captured credentials to the 8MB flash
+#include <math.h>        // sinf/expf for the synthesized boot laugh
 
 
 // Based on https://community.dfrobot.com/makelog-313463.html
@@ -71,6 +72,14 @@ const unsigned long BLINK_INTERVAL = 150;  // ms between toggles
 #define C_SOCKET  RGB565(10, 11, 16)     // eye sockets / nasal cavity (near black)
 #define C_EYE     RGB565(255, 40, 40)    // skull eyes, bright glow
 #define C_EYEDIM  RGB565(120, 16, 16)    // skull eyes, dim glow
+// Depth / menu shading palette
+#define C_BG2      RGB565(8, 9, 13)       // background gradient (bottom, darker)
+#define C_HDR_TOP  RGB565(56, 139, 255)   // header gradient top (brighter blue)
+#define C_HDR_BOT  RGB565(18, 74, 170)    // header gradient bottom (deep blue)
+#define C_CARD_HI  RGB565(46, 51, 63)     // row bevel highlight (top edge)
+#define C_CARD_SH  RGB565(6, 7, 10)       // drop shadow under cards / header
+#define C_ACC_DK   RGB565(18, 72, 160)    // selected row, bottom of accent
+#define C_ACC_HI   RGB565(120, 170, 255)  // selected row bevel / glow
 bool dotOn = false;
 
 // -------- App menu / state machine --------
@@ -877,9 +886,57 @@ void drawSkull(int cx, int cy, bool open, uint16_t eyeCol) {
   }
 }
 
+// -------- Evil laugh (synthesized, played through the S3 speaker) --------
+// The M5StickC Plus only had a buzzer, so the boot used two square-wave beeps.
+// The M5StickS3 has a real speaker (ES8311), so we synthesize a short voiced
+// "ha-ha-ha" cackle as 16-bit PCM and play it via M5.Speaker.playRaw(). The
+// buffer is generated once and kept for the program's lifetime (playRaw streams
+// from it asynchronously, so it must stay valid for the whole playback).
+#define LAUGH_SR 16000
+static int16_t* laughBuf = nullptr;
+static size_t   laughLen = 0;
+
+void buildLaugh() {
+  if (laughBuf) return;                        // build once
+  const int   NSYL   = 7;                      // number of "ha" syllables
+  const float sylDur = 0.16f;                  // voiced part of each (s)
+  const float gapDur = 0.06f;                  // silence between (s)
+  const float startF = 300.0f, endF = 165.0f;  // descending pitch -> evil cackle
+  size_t cap = (size_t)(LAUGH_SR * NSYL * (sylDur + gapDur)) + 8;
+  laughBuf = (int16_t*) ps_malloc(cap * sizeof(int16_t));   // prefer PSRAM
+  if (!laughBuf) laughBuf = (int16_t*) malloc(cap * sizeof(int16_t));
+  if (!laughBuf) { laughLen = 0; return; }     // no RAM: caller falls back to beeps
+
+  size_t idx = 0;
+  uint32_t rng = 0x1234abcd;
+  size_t sylN = (size_t)(LAUGH_SR * sylDur);
+  size_t gapN = (size_t)(LAUGH_SR * gapDur);
+  for (int s = 0; s < NSYL; s++) {
+    float f0 = startF + (endF - startF) * (s / (float)(NSYL - 1));
+    double ph1 = 0, ph2 = 0, ph3 = 0;
+    for (size_t n = 0; n < sylN && idx < cap; n++, idx++) {
+      float t   = n / (float)sylN;                                // 0..1 within the syllable
+      float env = expf(-4.2f * t) * (t < 0.03f ? t / 0.03f : 1);  // fast attack + decay = a "ha" pulse
+      float vib = 1.0f + 0.02f * sinf(2 * PI * 6.0f * n / LAUGH_SR);
+      float ff  = f0 * (1.0f - 0.12f * t) * vib;                  // downward glide + light vibrato
+      ph1 += 2 * PI * ff        / LAUGH_SR;
+      ph2 += 2 * PI * ff * 2.0f / LAUGH_SR;
+      ph3 += 2 * PI * ff * 3.0f / LAUGH_SR;
+      float voiced = (sinf(ph1) + 0.5f * sinf(ph2) + 0.25f * sinf(ph3)) / 1.75f;  // 3 harmonics
+      rng = rng * 1664525u + 1013904223u;
+      float noise = ((int32_t)(rng >> 16) - 32768) / 32768.0f;    // breath
+      int v = (int)(env * (0.9f * voiced + 0.1f * noise) * 9000.0f);
+      if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+      laughBuf[idx] = (int16_t)v;
+    }
+    for (size_t n = 0; n < gapN && idx < cap; n++, idx++) laughBuf[idx] = 0;
+  }
+  laughLen = idx;
+}
+
 // Boot splash: a smooth vector skull that laughs (jaw drops open/shut, pulsing
-// red eyes, slight head bob) with a "HA HA HA!" burst and a progress bar.
-// Runs ~5 seconds.
+// red eyes, slight head bob) with a "HA HA HA!" burst and a progress bar, now
+// synced to a real synthesized cackle on the speaker. Runs ~5 seconds.
 void bootScreen() {
   M5.Lcd.fillScreen(C_BG);
 
@@ -896,6 +953,18 @@ void bootScreen() {
   const unsigned long DURATION = 5000;  // ~5 seconds
   unsigned long start = millis();
   bool open = false;
+
+  // Kick off the real synthesized cackle once; it plays (twice) asynchronously
+  // while the skull animates. Falls back to the old square-wave beeps if the
+  // PCM buffer couldn't be allocated.
+  bool laughing = false;
+  if (soundOn) {
+    buildLaugh();
+    if (laughBuf && laughLen) {
+      M5.Speaker.playRaw(laughBuf, laughLen, LAUGH_SR, false, 2);
+      laughing = true;
+    }
+  }
 
   while (millis() - start < DURATION) {
     unsigned long el = millis() - start;
@@ -919,8 +988,8 @@ void bootScreen() {
     if (w > bw - 6) w = bw - 6;
     M5.Lcd.fillRoundRect(bx + 3, by + 3, w, bh - 6, 2, C_ACCENT);
 
-    // Short 8-bit "laugh" blip on each open frame (muteable via Config).
-    if (soundOn && open) {
+    // Fallback only: if the PCM laugh couldn't allocate, beep per open frame.
+    if (soundOn && open && !laughing) {
       M5.Speaker.tone(1500, 45);
       delay(45);
       M5.Speaker.tone(1100, 45);
@@ -1121,31 +1190,65 @@ void drawMenuIcon(int t, int cx, int cy, uint16_t col, uint16_t bg) {
   }
 }
 
+// -------- Depth / gradient helpers --------
+
+// Fill a rectangle with a vertical gradient between two RGB565 colors.
+void fillVGrad(int x, int y, int w, int h, uint16_t c1, uint16_t c2) {
+  if (h < 1) return;
+  int r1 = (c1 >> 11) & 0x1F, g1 = (c1 >> 5) & 0x3F, b1 = c1 & 0x1F;
+  int r2 = (c2 >> 11) & 0x1F, g2 = (c2 >> 5) & 0x3F, b2 = c2 & 0x1F;
+  int d = (h > 1) ? (h - 1) : 1;
+  for (int i = 0; i < h; i++) {
+    int r = r1 + (r2 - r1) * i / d, g = g1 + (g2 - g1) * i / d, b = b1 + (b2 - b1) * i / d;
+    M5.Lcd.drawFastHLine(x, y + i, w, (uint16_t)((r << 11) | (g << 5) | b));
+  }
+}
+
+// Paint a horizontal band of the full-screen background gradient (C_BG at the
+// top -> C_BG2 at the bottom) so partial repaints stay seamless.
+void fillBgBand(int y, int h) {
+  int r1 = (C_BG >> 11) & 0x1F, g1 = (C_BG >> 5) & 0x3F, b1 = C_BG & 0x1F;
+  int r2 = (C_BG2 >> 11) & 0x1F, g2 = (C_BG2 >> 5) & 0x3F, b2 = C_BG2 & 0x1F;
+  for (int i = 0; i < h; i++) {
+    int yy = y + i;
+    if (yy < 0 || yy >= 135) continue;
+    int r = r1 + (r2 - r1) * yy / 134, g = g1 + (g2 - g1) * yy / 134, b = b1 + (b2 - b1) * yy / 134;
+    M5.Lcd.drawFastHLine(0, yy, 240, (uint16_t)((r << 11) | (g << 5) | b));
+  }
+}
+
 // Live status line under the header on the main menu: portal state, captures
 // and connected clients. Redrawn on its own each tick so it stays current.
 void drawStatusStrip() {
-  M5.Lcd.fillRect(0, 28, 240, 14, C_BG);
+  fillBgBand(28, 14);
   int clients = portalStarted ? WiFi.softAPgetStationNum() : 0;
   M5.Lcd.fillCircle(12, 35, 3, portalStarted ? C_OK : C_DANGER);
   M5.Lcd.setTextDatum(ML_DATUM);
   M5.Lcd.setTextSize(1);
-  M5.Lcd.setTextColor(portalStarted ? C_OK : C_DANGER, C_BG);
+  M5.Lcd.setTextColor(portalStarted ? C_OK : C_DANGER);
   M5.Lcd.drawString(portalStarted ? "PORTAL ON" : "PORTAL OFF", 20, 35);
   M5.Lcd.setTextDatum(MR_DATUM);
-  M5.Lcd.setTextColor(C_MUTED, C_BG);
+  M5.Lcd.setTextColor(C_MUTED);
   M5.Lcd.drawString("Caps " + String(storedCount) + "   Cli " + String(clients), 232, 35);
 }
 
-// Brief centered toast, then the caller repaints the menu.
+// Brief centered toast with a quick "pop" (grow) animation.
 void toastMsg(const char* msg) {
-  const int w = 190, h = 42, x = (240 - w) / 2, y = (135 - h) / 2;
+  const int w = 190, h = 42, cx = 120, cy = 135 / 2;
+  for (int s = 1; s <= 3; s++) {              // grow from center
+    int ww = w * s / 3, hh = h * s / 3, x = cx - ww / 2, y = cy - hh / 2;
+    M5.Lcd.fillRoundRect(x, y, ww, hh, 8, C_ACCENT);
+    M5.Lcd.drawRoundRect(x, y, ww, hh, 8, C_ACC_HI);
+    delay(26);
+  }
+  int x = cx - w / 2, y = cy - h / 2;
   M5.Lcd.fillRoundRect(x, y, w, h, 8, C_ACCENT);
-  M5.Lcd.drawRoundRect(x, y, w, h, 8, C_ACCENT2);
+  M5.Lcd.drawRoundRect(x, y, w, h, 8, C_ACC_HI);
   M5.Lcd.setTextDatum(MC_DATUM);
   M5.Lcd.setTextSize(2);
   M5.Lcd.setTextColor(TFT_WHITE, C_ACCENT);
-  M5.Lcd.drawString(msg, 120, y + h / 2);
-  delay(900);
+  M5.Lcd.drawString(msg, cx, cy);
+  delay(850);
 }
 
 int currentMenuCount() {
@@ -1154,71 +1257,141 @@ int currentMenuCount() {
   return 5;                                 // Beep / LED / Brightness / Flip / Back
 }
 
-// Repaint the whole menu screen for the current state + selection.
-void drawMenu() {
-  M5.Lcd.fillScreen(C_BG);
+// Row geometry for the current menu state.
+void menuGeom(int &y0, int &rowH, int &rowInner) {
+  if (appState == ST_MENU_MAIN) { y0 = 46; rowH = 24; rowInner = 20; }
+  else                          { y0 = 28; rowH = 20; rowInner = 17; }
+}
 
-  // Header bar with left-aligned title + battery gauge on the right.
-  M5.Lcd.fillRect(0, 0, 240, 26, C_ACCENT);
+// Label + icon for row i of the current menu.
+void menuItem(int i, String &label, int &icon) {
+  if (appState == ST_MENU_MAIN) {
+    const char* L[] = {"Tools", "Configuration", "Exit"};
+    const int   I[] = {IC_TOOLS, IC_CONFIG, IC_POWER};
+    label = L[i]; icon = I[i];
+  } else if (appState == ST_MENU_TOOLS) {
+    const char* L[] = {"Start Portal", "Device Info", "Reset Captures", "Back"};
+    const int   I[] = {IC_PLAY, IC_INFO, IC_TRASH, IC_BACK};
+    label = L[i]; icon = I[i];
+  } else {
+    switch (i) {
+      case 0:  label = String("Beep: ")       + (soundOn ? "ON" : "OFF");    icon = IC_TOGGLE; break;
+      case 1:  label = String("LED blink: ")  + (ledBlinkOn ? "ON" : "OFF"); icon = IC_TOGGLE; break;
+      case 2:  label = String("Brightness: ") + String(brightLevel + 1);     icon = IC_BRIGHT; break;
+      case 3:  label = "Flip Screen";  icon = IC_FLIP; break;
+      default: label = "Back";         icon = IC_BACK; break;
+    }
+  }
+}
+
+// Draw one menu row as a raised card: drop shadow + top bevel + (when selected)
+// an accent fill, glow border, left stripe and caret. `xoff` slides the row
+// horizontally for the entrance animation.
+void drawMenuRow(int i, bool sel, int xoff) {
+  int y0, rowH, rowInner; menuGeom(y0, rowH, rowInner);
+  int y  = y0 + i * rowH;
+  int x  = 8 + xoff;
+  int yc = y + rowInner / 2;
+  String label; int icon; menuItem(i, label, icon);
+
+  uint16_t body = sel ? C_ACCENT : C_CARD;
+  uint16_t fg   = sel ? TFT_WHITE : C_MUTED;
+
+  M5.Lcd.fillRoundRect(x, y + 2, 224, rowInner, 5, C_CARD_SH);                     // drop shadow
+  M5.Lcd.fillRoundRect(x, y,     224, rowInner, 5, body);                          // card body
+  M5.Lcd.drawFastHLine(x + 6, y + 1,            212, sel ? C_ACC_HI : C_CARD_HI);  // top bevel highlight
+  M5.Lcd.drawFastHLine(x + 6, y + rowInner - 1, 212, sel ? C_ACC_DK : C_CARD_SH);  // bottom edge
+  if (sel) {
+    M5.Lcd.drawRoundRect(x, y, 224, rowInner, 5, C_ACC_HI);                         // glow border
+    M5.Lcd.fillRect(x, y + 3, 3, rowInner - 6, C_ACC_HI);                           // left accent stripe
+    M5.Lcd.fillTriangle(x + 213, yc - 4, x + 213, yc + 4, x + 219, yc, TFT_WHITE);  // caret
+  }
+  drawMenuIcon(icon, x + 17, yc + 1, C_CARD_SH, body);   // icon shadow (depth)
+  drawMenuIcon(icon, x + 16, yc,     fg,        body);   // icon
   M5.Lcd.setTextDatum(ML_DATUM);
   M5.Lcd.setTextSize(2);
-  M5.Lcd.setTextColor(TFT_WHITE, C_ACCENT);
-  const char* title = (appState == ST_MENU_MAIN) ? "MAIN MENU"
-                    : (appState == ST_MENU_TOOLS) ? "TOOLS" : "CONFIG";
-  M5.Lcd.drawString(title, 8, 13);
-  drawBatteryAt(206, 6, TFT_WHITE, C_ACCENT);
+  M5.Lcd.setTextColor(fg, body);
+  M5.Lcd.drawString(label, x + 32, yc);
+}
 
-  // Build item labels + icons for this menu.
-  String items[5];
-  int icons[5];
-  int n = currentMenuCount();
-  if (appState == ST_MENU_MAIN) {
-    items[0] = "Tools";         icons[0] = IC_TOOLS;
-    items[1] = "Configuration"; icons[1] = IC_CONFIG;
-    items[2] = "Exit";          icons[2] = IC_POWER;
-  } else if (appState == ST_MENU_TOOLS) {
-    items[0] = "Start Portal";  icons[0] = IC_PLAY;
-    items[1] = "Device Info";   icons[1] = IC_INFO;
-    items[2] = "Reset Captures";icons[2] = IC_TRASH;
-    items[3] = "Back";          icons[3] = IC_BACK;
-  } else {
-    items[0] = String("Beep: ")       + (soundOn ? "ON" : "OFF");   icons[0] = IC_TOGGLE;
-    items[1] = String("LED blink: ")  + (ledBlinkOn ? "ON" : "OFF");icons[1] = IC_TOGGLE;
-    items[2] = String("Brightness: ") + String(brightLevel + 1);    icons[2] = IC_BRIGHT;
-    items[3] = "Flip Screen";   icons[3] = IC_FLIP;
-    items[4] = "Back";          icons[4] = IC_BACK;
-  }
-
-  // Layout: the main menu gets a live status strip and roomier rows; the
-  // deeper menus use compact rows so up to 5 items fit.
-  bool main = (appState == ST_MENU_MAIN);
-  int y0, rowH, rowInner;
-  if (main) { drawStatusStrip(); y0 = 46; rowH = 24; rowInner = 20; }
-  else      { y0 = 28; rowH = 20; rowInner = 17; }
-
-  for (int i = 0; i < n; i++) {
-    int y = y0 + i * rowH;
-    int yc = y + rowInner / 2;
-    bool sel = (i == menuSel);
-    uint16_t bg = sel ? C_ACCENT : C_CARD;
-    uint16_t fg = sel ? TFT_WHITE : C_MUTED;
-    M5.Lcd.fillRoundRect(8, y, 224, rowInner, 4, bg);
-    if (sel) M5.Lcd.fillRect(8, y, 3, rowInner, C_ACCENT2);   // left accent stripe
-    drawMenuIcon(icons[i], 24, yc, fg, bg);                   // row icon
-    if (sel) M5.Lcd.fillTriangle(221, yc - 4, 221, yc + 4, 227, yc, TFT_WHITE);  // caret
-    M5.Lcd.setTextDatum(ML_DATUM);
-    M5.Lcd.setTextSize(2);
-    M5.Lcd.setTextColor(fg, bg);
-    M5.Lcd.drawString(items[i], 40, yc);
-  }
-
-  // Footer: controls hint + position indicator.
+// Footer: controls hint + position indicator.
+void drawMenuFooter(int n) {
   M5.Lcd.setTextSize(1);
-  M5.Lcd.setTextColor(C_MUTED, C_BG);
+  M5.Lcd.setTextColor(C_MUTED);
   M5.Lcd.setTextDatum(BL_DATUM);
   M5.Lcd.drawString("B:move  A:select", 6, 134);
   M5.Lcd.setTextDatum(BR_DATUM);
   M5.Lcd.drawString(String(menuSel + 1) + "/" + String(n), 234, 134);
+}
+
+// Update only the "x/n" position indicator (used after a selection move).
+void updateMenuCounter(int n) {
+  M5.Lcd.fillRect(208, 126, 28, 9, C_BG2);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(C_MUTED);
+  M5.Lcd.setTextDatum(BR_DATUM);
+  M5.Lcd.drawString(String(menuSel + 1) + "/" + String(n), 234, 134);
+}
+
+// Entrance animation: the rows slide in from the right, staggered, with an
+// ease-out so they settle smoothly into place.
+void animateMenuIn(int n) {
+  int y0, rowH, rowInner; menuGeom(y0, rowH, rowInner);
+  int bandY = y0, bandH = n * rowH + 4;
+  const int STEPS = 8;
+  for (int f = 1; f <= STEPS; f++) {
+    fillBgBand(bandY, bandH);
+    for (int i = 0; i < n; i++) {
+      float denom = (float)STEPS - i * 0.7f;
+      float p = (denom > 0.5f) ? (f - i * 0.7f) / denom : 1.0f;
+      if (p <= 0) continue;
+      if (p > 1) p = 1;
+      float e = 1 - (1 - p) * (1 - p) * (1 - p);   // easeOutCubic
+      int xoff = (int)((1 - e) * 230);
+      drawMenuRow(i, i == menuSel, xoff);
+    }
+    delay(16);
+  }
+  fillBgBand(bandY, bandH);
+  for (int i = 0; i < n; i++) drawMenuRow(i, i == menuSel, 0);
+}
+
+// Repaint the whole menu screen for the current state + selection. When
+// `animate` is set the rows slide in (used on menu transitions).
+void drawMenu(bool animate) {
+  int n = currentMenuCount();
+
+  fillBgBand(0, 135);                                    // background gradient
+  fillVGrad(0, 0, 240, 26, C_HDR_TOP, C_HDR_BOT);        // header gradient
+  M5.Lcd.drawFastHLine(0, 26, 240, C_CARD_SH);           // header drop shadow
+  M5.Lcd.setTextDatum(ML_DATUM);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextColor(TFT_WHITE);
+  const char* title = (appState == ST_MENU_MAIN) ? "MAIN MENU"
+                    : (appState == ST_MENU_TOOLS) ? "TOOLS" : "CONFIG";
+  M5.Lcd.drawString(title, 8, 13);
+  drawBatteryAt(206, 6, TFT_WHITE, C_HDR_TOP);
+
+  if (appState == ST_MENU_MAIN) drawStatusStrip();
+
+  if (animate) animateMenuIn(n);
+  else for (int i = 0; i < n; i++) drawMenuRow(i, i == menuSel, 0);
+
+  drawMenuFooter(n);
+}
+
+// Move the highlight to a new row: repaint just the two affected rows (snappy)
+// with a quick white "pop" flash on the newly selected one.
+void moveSelection(int oldSel) {
+  int n = currentMenuCount();
+  int y0, rowH, rowInner; menuGeom(y0, rowH, rowInner);
+  drawMenuRow(oldSel, false, 0);
+  drawMenuRow(menuSel, true, 0);
+  int y = y0 + menuSel * rowH;
+  M5.Lcd.drawRoundRect(8, y, 224, rowInner, 5, TFT_WHITE);   // flash
+  delay(45);
+  drawMenuRow(menuSel, true, 0);                             // settle (covers flash)
+  updateMenuCounter(n);
 }
 
 // Blocking info screen; returns to the Tools menu on any button press.
@@ -1255,7 +1428,7 @@ void showDeviceInfo() {
   }
   appState = ST_MENU_TOOLS;
   menuSel = 1;
-  drawMenu();
+  drawMenu(true);
 }
 
 // Blocking confirm screen for Exit. BtnA powers the device off; BtnB cancels.
@@ -1283,7 +1456,7 @@ void doExit() {
     if (M5.BtnB.wasPressed()) {
       appState = ST_MENU_MAIN;
       menuSel = 2;
-      drawMenu();
+      drawMenu(true);
       return;
     }
     delay(20);
@@ -1297,7 +1470,7 @@ void resetCaptures() {
   toastMsg("Captures cleared");
   appState = ST_MENU_TOOLS;
   menuSel = 2;
-  drawMenu();
+  drawMenu(true);
 }
 
 // Rotate the screen 180 degrees (handy for either hand); stays on Config.
@@ -1307,34 +1480,35 @@ void flipScreen() {
   saveSettings();
   appState = ST_MENU_CONFIG;
   menuSel = 3;
-  drawMenu();
+  drawMenu(true);
 }
 
 // Act on the highlighted item in the current menu.
 void selectCurrent() {
   if (appState == ST_MENU_MAIN) {
-    if (menuSel == 0)      { appState = ST_MENU_TOOLS;  menuSel = 0; drawMenu(); }
-    else if (menuSel == 1) { appState = ST_MENU_CONFIG; menuSel = 0; drawMenu(); }
+    if (menuSel == 0)      { appState = ST_MENU_TOOLS;  menuSel = 0; drawMenu(true); }
+    else if (menuSel == 1) { appState = ST_MENU_CONFIG; menuSel = 0; drawMenu(true); }
     else                   { doExit(); }
   } else if (appState == ST_MENU_TOOLS) {
     if (menuSel == 0)      { startPortal(); }           // -> ST_RUNNING
     else if (menuSel == 1) { showDeviceInfo(); }
     else if (menuSel == 2) { resetCaptures(); }
-    else                   { appState = ST_MENU_MAIN; menuSel = 0; drawMenu(); }
-  } else {  // ST_MENU_CONFIG
-    if (menuSel == 0)      { soundOn = !soundOn; saveSettings(); drawMenu(); }
-    else if (menuSel == 1) { ledBlinkOn = !ledBlinkOn; saveSettings(); drawMenu(); }
-    else if (menuSel == 2) { brightLevel = (brightLevel + 1) % 3; applyBrightness(); saveSettings(); drawMenu(); }
+    else                   { appState = ST_MENU_MAIN; menuSel = 0; drawMenu(true); }
+  } else {  // ST_MENU_CONFIG -- toggles repaint just their own row (snappy, no slide)
+    if (menuSel == 0)      { soundOn = !soundOn; saveSettings(); drawMenuRow(menuSel, true, 0); }
+    else if (menuSel == 1) { ledBlinkOn = !ledBlinkOn; saveSettings(); drawMenuRow(menuSel, true, 0); }
+    else if (menuSel == 2) { brightLevel = (brightLevel + 1) % 3; applyBrightness(); saveSettings(); drawMenuRow(menuSel, true, 0); }
     else if (menuSel == 3) { flipScreen(); }
-    else                   { appState = ST_MENU_MAIN; menuSel = 1; drawMenu(); }
+    else                   { appState = ST_MENU_MAIN; menuSel = 1; drawMenu(true); }
   }
 }
 
-// BtnB scrolls the selection, BtnA activates it.
+// BtnB scrolls the selection (animated), BtnA activates it.
 void handleMenuButtons() {
   if (M5.BtnB.wasPressed()) {
+    int oldSel = menuSel;
     menuSel = (menuSel + 1) % currentMenuCount();
-    drawMenu();
+    moveSelection(oldSel);
   }
   if (M5.BtnA.wasPressed()) {
     selectCurrent();
@@ -1361,7 +1535,7 @@ void setup() {
 
   appState = ST_MENU_MAIN;
   menuSel = 0;
-  drawMenu();         // boot into the menu instead of auto-starting the portal
+  drawMenu(true);     // boot into the menu (with entrance animation)
 }
 
 void loop() {
@@ -1373,7 +1547,7 @@ void loop() {
       stopPortal();
       appState = ST_MENU_MAIN;
       menuSel = 0;
-      drawMenu();
+      drawMenu(true);
       return;
     }
 
@@ -1402,7 +1576,7 @@ void loop() {
   // full repaint. Guarded so it doesn't run if a selection just left the menu.
   if (appState != ST_RUNNING && (millis() - lastTick) > TICK_TIMER) {
     lastTick = millis();
-    drawBatteryAt(206, 6, TFT_WHITE, C_ACCENT);
+    drawBatteryAt(206, 6, TFT_WHITE, C_HDR_TOP);
     if (appState == ST_MENU_MAIN) drawStatusStrip();
   }
 }

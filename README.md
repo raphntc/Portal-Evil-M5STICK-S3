@@ -81,11 +81,11 @@ The display is the same 135×240 panel, so all of the on-screen UI (skull, menus
 - 💀 Laughing-skull boot animation (~5 s), vector-drawn, now with a **real synthesized evil cackle** played through the speaker (falls back to beeps if RAM is tight).
 - 🎛️ **Animated on-device menu** (Tools / Configuration / Exit): gradient header + background, raised cards with drop shadows and bevels (depth), colored icons, a glowing selected row, rows that **slide in** when you open a menu and a **pop** when the highlight moves; plus a live status panel. The portal does **not** auto-start.
 - 🖥️ Live LCD: SSID, admin URL (`http://172.0.0.1/admin`), battery gauge, and victim count.
-- 🔊 Beep feedback on capture/boot via the speaker (toggleable).
+- 🔊 Speaker feedback: a beep on capture/boot and a **synthesized evil laugh on every new capture** — both toggleable in settings.
 - 📋 Operator dashboard at `/admin` — six stat tiles, AP info bar, search filter, configurable auto-refresh.
 - 🔑 Login-protected admin (HTTP Basic Auth; user/password configurable, can be turned off).
 - ⬇️ Export captures as **CSV** (`/export.csv`) or **JSON** (`/export.json`).
-- 🧰 Web settings page (`/settings`) — organized into sections (Portal / Display / Audio / Security) with SSID, auto-refresh, brightness, **screen flip 180°**, beep, **speaker volume slider**, LED, and login; a **show-password** toggle; and a read-only **Device status** panel (battery, uptime, free heap, flash used, lifetime captures). All live, no reflashing.
+- 🧰 Web settings page (`/settings`) — organized into sections (Portal / Display / Audio / Security) with SSID, auto-refresh, brightness, **screen flip 180°**, beep, **evil laugh on capture**, **speaker volume slider**, LED, and login; a **show-password** toggle; and a read-only **Device status** panel (battery, uptime, free heap, flash used, lifetime captures). All live, no reflashing.
 - 💾 Persistent settings saved to flash (NVS) and restored on boot.
 
 ---

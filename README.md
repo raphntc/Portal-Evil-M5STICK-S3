@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="logo.jpg" alt="Portal Evil HUEBR logo" width="420">
+<img src="logo.png" alt="Portal Evil HUEBR logo" width="640">
 
 # ⚡ Portal Evil HUEBR — M5StickS3 Edition
 

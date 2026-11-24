@@ -6,6 +6,22 @@
 #include <LittleFS.h>    // persist captured credentials to the 8MB flash
 #include <math.h>        // sinf/expf for the synthesized boot laugh
 
+// ---- WiFi Duck (BadUSB) : native USB-HID keyboard on the ESP32-S3 ----
+// The S3 has a native USB-OTG peripheral, so it can enumerate as a real USB
+// keyboard and "type" a DuckyScript payload into the host it is plugged into,
+// triggered over Wi-Fi (like Dstike / SpaceHuhn's WiFi Duck). HID is only
+// available when the firmware is built in USB-OTG (TinyUSB) mode
+// (USBMode=default). In the hardware-CDC build the Duck UI still works but the
+// typing itself compiles to a safe no-op (DUCK_HID == 0).
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 0
+  #define DUCK_HID 1
+  #include "USB.h"
+  #include "USBHIDKeyboard.h"
+  USBHIDKeyboard DuckKbd;
+#else
+  #define DUCK_HID 0
+#endif
+
 
 // Based on https://community.dfrobot.com/makelog-313463.html
 // Modified font and text placement for StickC-Plus, further improvements added
@@ -28,6 +44,8 @@
 #define CLEAR_TITLE "Cleared"
 #define ADMIN_USER_DEF "admin"      // default dashboard login user
 #define ADMIN_PASS_DEF "huebr"      // default dashboard login password
+#define DUCK_SSID_DEF "WiFiDuck-HUEBR"  // default WiFi Duck AP name (WPA2)
+#define DUCK_PASS_DEF "quack1234"       // default WiFi Duck AP password (>=8 chars)
 
 int capcount = 0;           // lifetime captures (shown on the LCD)
 int storedCount = 0;        // entries currently held in the ring buffer
@@ -91,10 +109,22 @@ bool dotOn = false;
 // The device boots into a menu (Tools / Configuration / Exit) instead of
 // launching the portal straight away. The portal AP + web server only come
 // up when the operator chooses Tools > Start Evil Portal.
-enum AppState { ST_MENU_MAIN, ST_MENU_TOOLS, ST_MENU_CONFIG, ST_RUNNING };
+// Two selectable projects share this firmware; the main menu picks one and the
+// device runs either the Evil Portal (ST_RUNNING) or the WiFi Duck
+// (ST_DUCK_RUNNING) -- never both at once.
+enum AppState { ST_MENU_MAIN, ST_MENU_PORTAL, ST_MENU_DUCK, ST_MENU_CONFIG, ST_RUNNING, ST_DUCK_RUNNING };
 AppState appState = ST_MENU_MAIN;
 int menuSel = 0;              // highlighted row in the current menu
-bool portalStarted = false;  // AP + web server currently up?
+
+enum Project { PROJ_PORTAL, PROJ_DUCK };
+Project activeProject = PROJ_PORTAL;  // which project owns the web server right now
+
+bool portalStarted = false;  // Evil Portal AP + web server currently up?
+bool duckUp = false;         // WiFi Duck AP + web server currently up?
+
+// Remember which submenu a blocking info/confirm screen should return to.
+AppState infoReturn = ST_MENU_PORTAL;
+int      infoReturnSel = 1;
 
 // Configuration options (toggled from the Configuration menu / web settings;
 // all persisted to flash via Preferences and reloaded on boot)
@@ -111,6 +141,24 @@ String  adminUser = ADMIN_USER_DEF;    // /admin login user
 String  adminPass = ADMIN_PASS_DEF;    // /admin login password
 bool    authOn    = true;              // require login to reach /admin
 uint8_t autoRefresh = 15;              // dashboard auto-refresh seconds (0 = off)
+
+String  duckSsid  = DUCK_SSID_DEF;     // WiFi Duck AP SSID (runtime-settable)
+String  duckPass  = DUCK_PASS_DEF;     // WiFi Duck AP WPA2 password
+bool    duckAutorun = false;           // auto-run the default payload when the Duck starts
+
+// ---- WiFi Duck execution state (non-blocking DuckyScript interpreter) ----
+String   duckScript;                   // the script text currently being run
+int      duckLineStart = 0;            // parse cursor: offset of the next line
+bool     duckBusy = false;             // a script is currently executing
+unsigned long duckResumeAt = 0;        // millis() to resume after a DELAY
+int      duckDefaultDelay = 0;         // ms inserted between commands (DEFAULTDELAY)
+String   duckPrevLine;                 // last executed line (for REPEAT)
+int      duckLinesDone = 0;            // lines executed so far (progress)
+int      duckLinesTotal = 0;           // non-empty line count (for the UI)
+String   duckStatusMsg = "Idle";       // short status shown on the LCD + web
+#define  DUCK_DIR     "/duck"           // saved payloads live here (LittleFS)
+#define  DUCK_DEFAULT "/duck/payload.txt"  // the default / last-run payload
+
 Preferences prefs;                     // NVS-backed settings store
  
 // Init System Settings
@@ -251,9 +299,14 @@ void loadSettings() {
   authOn      = prefs.getBool("auth", true);
   autoRefresh = prefs.getUChar("refresh", 15);
   spkVol      = prefs.getUChar("vol", 60);
+  duckSsid    = prefs.getString("dssid", DUCK_SSID_DEF);
+  duckPass    = prefs.getString("dpass", DUCK_PASS_DEF);
+  duckAutorun = prefs.getBool("dauto", false);
   capcount    = prefs.getInt("lifetime", 0);  // lifetime count, restored across reboots
   prefs.end();
   if (spkVol > 100) spkVol = 100;
+  if (duckSsid.length() == 0) duckSsid = DUCK_SSID_DEF;
+  if (duckPass.length() < 8)  duckPass = DUCK_PASS_DEF;   // WPA2 needs >=8 chars
   if (brightLevel > 2) brightLevel = 2;
   if (screenRot != 1 && screenRot != 3) screenRot = 3;
   if (autoRefresh > 120) autoRefresh = 120;
@@ -274,6 +327,9 @@ void saveSettings() {
   prefs.putString("apass", adminPass);
   prefs.putBool("auth", authOn);
   prefs.putUChar("refresh", autoRefresh);
+  prefs.putString("dssid", duckSsid);
+  prefs.putString("dpass", duckPass);
+  prefs.putBool("dauto", duckAutorun);
   prefs.end();
 }
 
@@ -570,6 +626,18 @@ String settingsPage(bool saved) {
     "<p class=\"hint\">How often the /admin dashboard reloads itself in the browser.</p></div>"
     "</div>"
 
+    // --- WiFi Duck ---
+    "<div class=\"card\">"
+    "<div class=\"sec\">&#128038; WiFi Duck</div>"
+    "<div class=\"row\"><label>Duck AP name (SSID)</label>"
+    "<input type=\"text\" name=\"dssid\" maxlength=\"31\" value=\"" + attrEsc(duckSsid) + "\"></div>"
+    "<div class=\"row\"><label>Duck AP password (WPA2, min 8 chars)</label>"
+    "<input type=\"text\" name=\"dpass\" maxlength=\"31\" value=\"" + attrEsc(duckPass) + "\">"
+    "<p class=\"hint\">Connect to this network, then open the panel to write and run DuckyScript.</p></div>"
+    "<div class=\"row chk\"><input type=\"checkbox\" name=\"dauto\" " + String(duckAutorun ? "checked" : "") + ">"
+    "<span>Auto-exec default payload on Duck start<span class=\"sub\">Runs the saved <code>payload</code> the instant the WiFi Duck is started.</span></span></div>"
+    "</div>"
+
     // --- Display ---
     "<div class=\"card\">"
     "<div class=\"sec\">&#128421;&#65039; Display</div>"
@@ -656,6 +724,13 @@ bool applySettings() {
   String p = webServer.arg("apass"); p = p.substring(0, 31);
   if (u.length() > 0) adminUser = u;
   adminPass = p;
+
+  // WiFi Duck AP settings
+  String ds = webServer.arg("dssid"); ds = ds.substring(0, 31);
+  String dp = webServer.arg("dpass"); dp = dp.substring(0, 31);
+  if (ds.length() > 0) duckSsid = ds;
+  if (dp.length() >= 8) duckPass = dp;     // keep the old one if too short for WPA2
+  duckAutorun = webServer.hasArg("dauto");
 
   applyBrightness();
   applyVolume();
@@ -1116,25 +1191,29 @@ void drawMainScreen() {
   // Battery gauge (top-right of the SSID row)
   drawBattery();
 
-  // Admin panel link
+  // Access block: the IP + path to reach each thing (join the Wi-Fi first).
+  String ip = APIP.toString();
   M5.Lcd.setTextDatum(TL_DATUM);
   M5.Lcd.setTextSize(1);
   M5.Lcd.setTextColor(C_MUTED, C_BG);
-  M5.Lcd.drawString("ADMIN PANEL - OPEN ON PHONE:", 8, 63);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setTextColor(C_ACCENT2, C_BG);
-  M5.Lcd.drawString("http://" + APIP.toString() + "/admin", 8, 77);
+  M5.Lcd.drawString("JOIN WI-FI, THEN OPEN:", 8, 61);
+  // Portal (victim page) = any URL -> "/"
+  M5.Lcd.setTextColor(C_MUTED, C_BG);   M5.Lcd.drawString("Portal", 8, 73);
+  M5.Lcd.setTextColor(C_ACCENT2, C_BG); M5.Lcd.drawString("http://" + ip + "/", 56, 73);
+  // Admin dashboard = "/admin"
+  M5.Lcd.setTextColor(C_MUTED, C_BG);   M5.Lcd.drawString("Admin", 8, 83);
+  M5.Lcd.setTextColor(C_ACCENT2, C_BG); M5.Lcd.drawString("http://" + ip + "/admin", 56, 83);
 
   // Victim-count card
-  M5.Lcd.fillRoundRect(3, 92, 234, 40, 8, C_CARD);
+  M5.Lcd.fillRoundRect(3, 96, 234, 36, 8, C_CARD);
   M5.Lcd.setTextDatum(ML_DATUM);
   M5.Lcd.setTextSize(1);
   M5.Lcd.setTextColor(C_MUTED, C_CARD);
-  M5.Lcd.drawString("VICTIMS CAPTURED", 14, 112);
+  M5.Lcd.drawString("VICTIMS CAPTURED", 14, 114);
   M5.Lcd.setTextDatum(MR_DATUM);
   M5.Lcd.setTextSize(4);
   M5.Lcd.setTextColor(C_COUNT, C_CARD);
-  M5.Lcd.drawString(String(capcount), 226, 111);
+  M5.Lcd.drawString(String(capcount), 226, 114);
 
   drawBloodFrame();   // blood running down the screen
 }
@@ -1146,6 +1225,415 @@ void applyBrightness() {
 // Apply the stored speaker volume (0..100%) to the M5Unified speaker (0..255).
 void applyVolume() {
   M5.Speaker.setVolume((uint8_t)map(spkVol, 0, 100, 0, 255));
+}
+
+// ======================= WiFi Duck (BadUSB) =======================
+// A second project sharing this firmware: the M5StickS3 enumerates as a USB
+// keyboard and "types" a DuckyScript payload into the host it is plugged into,
+// triggered over Wi-Fi from the control panel. Inspired by the Dstike /
+// SpaceHuhn WiFi Duck. For education / authorized testing only.
+
+// Map a DuckyScript key token -> USB HID keycode. Returns 0 if unknown (the
+// caller then types the token as a literal single character).
+#if DUCK_HID
+uint8_t duckKeyCode(const String &tok) {
+  String k = tok; k.toUpperCase();
+  if (k == "ENTER" || k == "RETURN")       return KEY_RETURN;
+  if (k == "ESC"   || k == "ESCAPE")       return KEY_ESC;
+  if (k == "TAB")                          return KEY_TAB;
+  if (k == "SPACE")                        return ' ';
+  if (k == "BACKSPACE" || k == "BKSP")     return KEY_BACKSPACE;
+  if (k == "DELETE" || k == "DEL")         return KEY_DELETE;
+  if (k == "INSERT" || k == "INS")         return KEY_INSERT;
+  if (k == "HOME")                         return KEY_HOME;
+  if (k == "END")                          return KEY_END;
+  if (k == "PAGEUP"   || k == "PAGE_UP")   return KEY_PAGE_UP;
+  if (k == "PAGEDOWN" || k == "PAGE_DOWN") return KEY_PAGE_DOWN;
+  if (k == "UP"    || k == "UPARROW")      return KEY_UP_ARROW;
+  if (k == "DOWN"  || k == "DOWNARROW")    return KEY_DOWN_ARROW;
+  if (k == "LEFT"  || k == "LEFTARROW")    return KEY_LEFT_ARROW;
+  if (k == "RIGHT" || k == "RIGHTARROW")   return KEY_RIGHT_ARROW;
+  if (k == "CAPSLOCK")                     return KEY_CAPS_LOCK;
+  if (k == "GUI" || k == "WINDOWS" || k == "WIN" || k == "META") return KEY_LEFT_GUI;
+  if (k == "CTRL"  || k == "CONTROL")      return KEY_LEFT_CTRL;
+  if (k == "ALT")                          return KEY_LEFT_ALT;
+  if (k == "SHIFT")                        return KEY_LEFT_SHIFT;
+  if (k.length() >= 2 && k[0] == 'F') {    // F1..F12
+    int n = k.substring(1).toInt();
+    if (n >= 1 && n <= 12) return (uint8_t)(KEY_F1 + (n - 1));
+  }
+  return 0;
+}
+#endif
+
+// Press a whole line as a simultaneous combo (e.g. "CTRL ALT DELETE", "GUI r").
+// Modifiers + named keys resolve through duckKeyCode(); a lone character is
+// typed literally. All keys are released together afterwards.
+void duckPressCombo(const String &line) {
+#if DUCK_HID
+  int start = 0, np = 0;
+  while (start < (int)line.length() && np < 8) {
+    int sp = line.indexOf(' ', start);
+    if (sp < 0) sp = line.length();
+    String tok = line.substring(start, sp); tok.trim();
+    start = sp + 1;
+    if (tok.length() == 0) continue;
+    uint8_t code = duckKeyCode(tok);
+    if (code == 0 && tok.length() == 1) code = (uint8_t)tok[0];  // literal key
+    if (code) { DuckKbd.press(code); np++; }
+  }
+  delay(8);
+  DuckKbd.releaseAll();
+#endif
+}
+
+// Execute one DuckyScript line. Only DELAY is non-blocking (it arms
+// duckResumeAt); everything else runs inline because lines are short.
+void duckRunLine(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+
+  int sp = line.indexOf(' ');
+  String cmd  = (sp < 0) ? line : line.substring(0, sp);
+  String rest = (sp < 0) ? ""   : line.substring(sp + 1);
+  String CMD  = cmd; CMD.toUpperCase();
+
+  if (CMD == "REM" || CMD.startsWith("//")) return;             // comment
+
+  if (CMD == "DELAY") {
+    duckResumeAt = millis() + (unsigned long)rest.toInt();      // honored by duckTick()
+    return;
+  }
+  if (CMD == "DEFAULTDELAY" || CMD == "DEFAULT_DELAY") {
+    duckDefaultDelay = rest.toInt();
+    return;
+  }
+  if (CMD == "REPEAT" || CMD == "REPLAY") {
+    int n = rest.toInt();
+    for (int i = 0; i < n; i++) duckRunLine(duckPrevLine);      // re-run last line
+    return;                                                     // keep prevLine as-is
+  }
+
+  if (CMD == "STRING") {
+#if DUCK_HID
+    DuckKbd.print(rest);
+#endif
+  } else if (CMD == "STRINGLN") {
+#if DUCK_HID
+    DuckKbd.print(rest);
+    DuckKbd.write(KEY_RETURN);
+#endif
+  } else {
+    duckPressCombo(line);                                       // a key / combo
+  }
+
+  if (duckDefaultDelay > 0)                                     // gap between commands
+    duckResumeAt = millis() + duckDefaultDelay;
+  duckPrevLine = line;
+}
+
+// Advance the running script: wait out any DELAY, else run the next line. One
+// line per call keeps the web server + buttons responsive while typing.
+void duckTick() {
+  if (!duckBusy) return;
+  if (millis() < duckResumeAt) return;                          // still inside a DELAY
+  if (duckLineStart >= (int)duckScript.length()) {              // reached the end
+    duckBusy = false;
+    duckStatusMsg = "Done (" + String(duckLinesDone) + " lines)";
+    return;
+  }
+  int nl = duckScript.indexOf('\n', duckLineStart);
+  if (nl < 0) nl = duckScript.length();
+  String line = duckScript.substring(duckLineStart, nl);
+  duckLineStart = nl + 1;
+  line.replace("\r", "");
+  if (line.length()) { duckRunLine(line); duckLinesDone++; }
+}
+
+// Load a script into the interpreter and start it from the top.
+void duckStartScript(const String &script) {
+  duckScript       = script;
+  duckLineStart    = 0;
+  duckResumeAt     = 0;
+  duckDefaultDelay = 0;
+  duckPrevLine     = "";
+  duckLinesDone    = 0;
+  duckLinesTotal   = 0;
+  int p = 0;                                                    // count non-empty lines
+  while (p < (int)script.length()) {
+    int nl = script.indexOf('\n', p); if (nl < 0) nl = script.length();
+    String l = script.substring(p, nl); l.trim();
+    if (l.length()) duckLinesTotal++;
+    p = nl + 1;
+  }
+  duckBusy = true;
+  duckStatusMsg = "Running...";
+}
+
+void duckStop() {
+#if DUCK_HID
+  DuckKbd.releaseAll();
+#endif
+  duckBusy = false;
+  duckStatusMsg = "Stopped";
+}
+
+// -------- Saved payloads on LittleFS --------
+
+String duckReadFile(const String &path) {
+  File f = LittleFS.open(path, FILE_READ);
+  if (!f) return "";
+  String s = f.readString();
+  f.close();
+  return s;
+}
+
+bool duckWriteFile(const String &path, const String &data) {
+  LittleFS.mkdir(DUCK_DIR);
+  File f = LittleFS.open(path, FILE_WRITE);
+  if (!f) return false;
+  f.print(data);
+  f.close();
+  return true;
+}
+
+// Turn a user-supplied payload name into a safe /duck/<name>.txt path
+// (alnum/-/_ only, no path traversal).
+String duckPathFor(String name) {
+  String clean;
+  for (size_t i = 0; i < name.length() && clean.length() < 24; i++) {
+    char c = name[i];
+    bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') || c == '-' || c == '_';
+    if (ok) clean += c;
+  }
+  if (clean.length() == 0) clean = "payload";
+  return String(DUCK_DIR) + "/" + clean + ".txt";
+}
+
+// Stream the list of saved payload names as a JSON array.
+void sendDuckList() {
+  String out = "[";
+  bool first = true;
+  File dir = LittleFS.open(DUCK_DIR);
+  if (dir && dir.isDirectory()) {
+    for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+      String n = String(e.name());
+      int slash = n.lastIndexOf('/'); if (slash >= 0) n = n.substring(slash + 1);
+      if (n.endsWith(".txt")) {
+        n = n.substring(0, n.length() - 4);
+        out += (first ? "" : ",") + jsonStr(n);
+        first = false;
+      }
+    }
+  }
+  out += "]";
+  webServer.send(HTTP_CODE, "application/json", out);
+}
+
+// -------- Web control panel (served for any path while the Duck is active) --
+String duckPanel() {
+  String css =
+    ":root{--bg:#0d0708;--card:#1a1012;--line:#3a1c1e;--txt:#e9e2e2;--mut:#b09a9a;--accent:#c01818;--ok:#30a36c;--danger:#e5484d}"
+    "*{box-sizing:border-box}"
+    "body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.5}"
+    ".top{background:linear-gradient(90deg,#3a0607,#b11212);padding:18px 20px;position:relative;border-bottom:3px solid #6e0a0a}"
+    ".top::after{content:'';position:absolute;left:0;right:0;top:100%;height:16px;z-index:5;background:radial-gradient(10px 15px at 14px 0,#9e0f0f 58%,transparent 60%) repeat-x;background-size:46px 16px}"
+    ".top h1{margin:0;font-size:20px}.top p{margin:3px 0 0;color:#f0c9c9;font-size:13px}"
+    ".wrap{max-width:860px;margin:0 auto;padding:16px}"
+    ".card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 16px}"
+    ".sec{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:#ff8a8a;font-weight:700;margin:0 0 12px}"
+    "textarea{width:100%;min-height:230px;padding:12px;border-radius:10px;border:1px solid var(--line);background:#0c0f14;color:#e9e2e2;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:14px;line-height:1.45;resize:vertical}"
+    ".bar{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 0}"
+    ".btn{display:inline-block;padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--txt);font-size:15px;cursor:pointer}"
+    ".btn:hover{border-color:var(--accent)}"
+    ".btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}"
+    ".btn.stop{background:transparent;border-color:var(--danger);color:#ff9a9d}"
+    ".btn.stop:hover{background:var(--danger);color:#fff}"
+    ".row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}"
+    "input,select{padding:9px 11px;border-radius:9px;border:1px solid var(--line);background:#10131a;color:var(--txt);font-size:14px}"
+    "input{flex:1;min-width:140px}"
+    ".st{display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--mut)}"
+    ".dot{width:10px;height:10px;border-radius:50%;background:var(--ok)}"
+    ".dot.run{background:var(--danger);animation:bl .6s steps(2) infinite}@keyframes bl{to{opacity:.25}}"
+    ".warn{background:rgba(229,72,77,.12);border:1px solid var(--danger);color:#ff9a9d;border-radius:10px;padding:10px 14px;margin:0 0 16px;font-size:13px}"
+    ".grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;font-size:13px;color:var(--mut)}"
+    ".grid code{color:#7ee2b8;background:#0c0f14;border:1px solid var(--line);border-radius:5px;padding:1px 6px}"
+    ".grid i{color:var(--mut);font-style:italic}"
+    "code.k{color:#ff8a8a}"
+    ".hint{color:var(--mut);font-size:12px;margin:8px 0 0}"
+    ".hint code{color:#7ee2b8}";
+
+  String warn = DUCK_HID
+    ? ""
+    : "<div class=\"warn\">&#9888;&#65039; This firmware was built without USB-OTG (TinyUSB), so the keyboard is disabled &mdash; scripts run but nothing is typed. Rebuild with <code>USBMode=default</code> to enable HID.</div>";
+
+  return
+    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+    "<title>" + attrEsc(duckSsid) + " :: WiFi Duck</title><style>" + css + "</style></head><body>"
+    "<div class=\"top\"><h1>&#128038; WiFi Duck &mdash; Portal Evil HUEBR</h1><p>DuckyScript over Wi-Fi &middot; US keyboard layout</p></div>"
+    "<div class=\"wrap\">"
+    + warn +
+    "<div class=\"card\">"
+    "<div class=\"row\" style=\"justify-content:space-between\">"
+    "<div class=\"sec\" style=\"margin:0\">Payload</div>"
+    "<div class=\"st\"><span id=\"dot\" class=\"dot\"></span><span id=\"stat\">Idle</span></div></div>"
+    "<textarea id=\"s\" spellcheck=\"false\" placeholder=\"REM your DuckyScript here\nDELAY 500\nGUI r\nDELAY 300\nSTRING notepad\nENTER\"></textarea>"
+    "<div class=\"bar\">"
+    "<button class=\"btn primary\" onclick=\"run()\">&#9654; Run</button>"
+    "<button class=\"btn stop\" onclick=\"stop()\">&#9632; Stop</button>"
+    "<label class=\"st\" style=\"margin-left:auto\"><input type=\"checkbox\" id=\"au\" onchange=\"setauto()\"> Auto-exec on start</label>"
+    "</div>"
+    "<p class=\"hint\" id=\"auh\">When on, the device runs the default payload automatically the moment the WiFi Duck starts (or a host is plugged in).</p>"
+    "</div>"
+
+    "<div class=\"card\">"
+    "<div class=\"sec\">Saved payloads</div>"
+    "<div class=\"row\">"
+    "<select id=\"sel\"></select>"
+    "<button class=\"btn primary\" onclick=\"runsaved()\">&#9654; Run</button>"
+    "<button class=\"btn\" onclick=\"load()\">Load to editor</button>"
+    "<button class=\"btn stop\" onclick=\"del()\">Delete</button>"
+    "</div>"
+    "<div class=\"row\" style=\"margin-top:10px\">"
+    "<input id=\"nm\" placeholder=\"name (letters, digits, - _)\">"
+    "<button class=\"btn\" onclick=\"save()\">&#128190; Save editor as...</button>"
+    "</div>"
+    "<p class=\"hint\">The last script you Run is also stored as <code>payload</code> (the default used by Auto-exec and the device's front button).</p>"
+    "</div>"
+
+    "<div class=\"card\">"
+    "<div class=\"sec\">Templates (click to load into the editor)</div>"
+    "<div class=\"bar\">"
+    "<button class=\"btn\" onclick=\"tpl('win-run')\">Win: Run dialog</button>"
+    "<button class=\"btn\" onclick=\"tpl('win-ps')\">Win: PowerShell</button>"
+    "<button class=\"btn\" onclick=\"tpl('win-lock')\">Win: Lock screen</button>"
+    "<button class=\"btn\" onclick=\"tpl('mac-spot')\">macOS: Spotlight</button>"
+    "<button class=\"btn\" onclick=\"tpl('hello')\">Hello World</button>"
+    "</div></div>"
+
+    "<div class=\"card\">"
+    "<div class=\"sec\">DuckyScript reference</div>"
+    "<div class=\"grid\">"
+    "<div><code class=\"k\">REM</code> <i>text</i> &mdash; comment</div><div><code class=\"k\">DELAY</code> <code>ms</code> &mdash; pause</div>"
+    "<div><code class=\"k\">STRING</code> <code>text</code> &mdash; type text</div><div><code class=\"k\">STRINGLN</code> <code>text</code> &mdash; type + Enter</div>"
+    "<div><code class=\"k\">DEFAULTDELAY</code> <code>ms</code> &mdash; gap between lines</div><div><code class=\"k\">REPEAT</code> <code>n</code> &mdash; repeat last line</div>"
+    "<div>Modifiers: <code>GUI</code>/<code>WINDOWS</code> <code>CTRL</code> <code>ALT</code> <code>SHIFT</code></div><div>Combos: <code>GUI r</code>, <code>CTRL ALT DELETE</code>, <code>CTRL SHIFT ESC</code></div>"
+    "<div>Keys: <code>ENTER</code> <code>TAB</code> <code>ESC</code> <code>SPACE</code> <code>BACKSPACE</code> <code>DELETE</code></div><div>Nav: <code>UP</code> <code>DOWN</code> <code>LEFT</code> <code>RIGHT</code> <code>HOME</code> <code>END</code> <code>PAGEUP</code> <code>PAGEDOWN</code></div>"
+    "<div>Function: <code>F1</code> .. <code>F12</code> <code>CAPSLOCK</code> <code>INSERT</code></div><div>Each line = keys pressed together, then released.</div>"
+    "</div>"
+    "<p class=\"hint\">Keyboard layout is <b>US (QWERTY)</b>. On a target set to another layout, some symbols/accented characters may differ.</p>"
+    "</div>"
+
+    "<script>"
+    "var S=document.getElementById('s'),ST=document.getElementById('stat'),D=document.getElementById('dot'),AU=document.getElementById('au');"
+    "var T={"
+    "'win-run':'REM Open the Windows Run dialog\\nDELAY 500\\nGUI r\\nDELAY 300\\nSTRING notepad\\nENTER\\n',"
+    "'win-ps':'REM Open an elevated PowerShell (confirm UAC)\\nDELAY 500\\nGUI r\\nDELAY 300\\nSTRING powershell\\nENTER\\n',"
+    "'win-lock':'REM Lock the workstation\\nDELAY 300\\nGUI l\\n',"
+    "'mac-spot':'REM Open Spotlight and launch an app\\nDELAY 500\\nGUI SPACE\\nDELAY 400\\nSTRING Terminal\\nENTER\\n',"
+    "'hello':'REM Type a line of text\\nDELAY 500\\nSTRING Hello from Portal Evil HUEBR - WiFi Duck!\\nENTER\\n'};"
+    "function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b});}"
+    "function enc(o){return Object.keys(o).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(o[k])).join('&');}"
+    "function run(){post('/duck/run',enc({script:S.value})).then(poll);}"
+    "function stop(){fetch('/duck/stop').then(poll);}"
+    "function runsaved(){var n=document.getElementById('sel').value;if(n)fetch('/duck/runsaved?name='+encodeURIComponent(n)).then(poll);}"
+    "function save(){var n=document.getElementById('nm').value||'payload';post('/duck/save',enc({name:n,script:S.value})).then(()=>list());}"
+    "function del(){var n=document.getElementById('sel').value;if(n)fetch('/duck/del?name='+encodeURIComponent(n)).then(()=>list());}"
+    "function load(){var n=document.getElementById('sel').value;if(n)fetch('/duck/load?name='+encodeURIComponent(n)).then(r=>r.text()).then(t=>{S.value=t;});}"
+    "function tpl(k){S.value=T[k];}"
+    "function setauto(){fetch('/duck/autorun?on='+(AU.checked?'1':'0'));}"
+    "function list(){fetch('/duck/list').then(r=>r.json()).then(a=>{var s=document.getElementById('sel');s.innerHTML='';a.forEach(n=>{var o=document.createElement('option');o.value=o.textContent=n;s.appendChild(o);});});}"
+    "function poll(){fetch('/duck/status').then(r=>r.json()).then(j=>{ST.textContent=j.busy?('Running '+j.done+'/'+j.total):(j.hid?j.msg:'HID disabled');D.className='dot'+(j.busy?' run':'');AU.checked=j.autorun;});}"
+    "list();setInterval(poll,1000);poll();"
+    "</script>"
+    "</div></body></html>";
+}
+
+// -------- WiFi Duck LCD screen (240x135, blood theme) --------
+
+void drawDuckScreenStatus();  // fwd
+
+void drawDuckScreen() {
+  M5.Lcd.fillScreen(C_BG);
+  fillVGrad(0, 0, 240, 26, C_HDR_TOP, C_HDR_BOT);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextColor(TFT_WHITE);
+  M5.Lcd.drawString("WIFI DUCK", 112, 13);
+  drawStatusDot(true);
+
+  M5.Lcd.setTextDatum(TL_DATUM);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(C_MUTED, C_BG);   M5.Lcd.drawString("AP SSID", 8, 31);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextColor(TFT_WHITE, C_BG); M5.Lcd.drawString(duckSsid, 8, 41);
+
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(C_MUTED, C_BG);   M5.Lcd.drawString("Pass", 8, 61);
+  M5.Lcd.setTextColor(TFT_WHITE, C_BG); M5.Lcd.drawString(duckPass, 44, 61);
+  // Access: join the WPA2 AP above, then open the control panel at the gateway.
+  M5.Lcd.setTextColor(C_MUTED, C_BG);   M5.Lcd.drawString("Panel", 8, 73);
+  M5.Lcd.setTextColor(C_ACCENT2, C_BG); M5.Lcd.drawString("http://" + APIP.toString() + "/", 44, 73);
+#if !DUCK_HID
+  M5.Lcd.setTextColor(C_DANGER, C_BG);  M5.Lcd.drawString("HID OFF - rebuild USB-OTG", 8, 85);
+#endif
+
+  drawDuckScreenStatus();
+  drawBloodFrame();
+}
+
+// Status card + live battery (redrawn each tick without a full repaint).
+void drawDuckScreenStatus() {
+  M5.Lcd.fillRoundRect(8, 97, 224, 31, 8, C_CARD);
+  M5.Lcd.setTextDatum(TL_DATUM);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(C_MUTED, C_CARD);
+  M5.Lcd.drawString("STATUS", 16, 103);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextColor(duckBusy ? C_COUNT : C_OK, C_CARD);
+  String st = duckBusy ? ("RUN " + String(duckLinesDone) + "/" + String(duckLinesTotal))
+                       : duckStatusMsg;
+  if (st.length() > 17) st = st.substring(0, 17);
+  M5.Lcd.drawString(st, 16, 113);
+  drawBatteryAt(210, 38, C_MUTED, C_BG);   // keep the battery reading current
+}
+
+// Bring up the WiFi Duck AP (WPA2) + web control panel, and show its screen.
+void startDuck() {
+  activeProject = PROJ_DUCK;
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(APIP, APIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(duckSsid.c_str(), duckPass.c_str());   // WPA2-protected
+  dnsServer.start(DNS_PORT, "*", APIP);              // captive-style: any URL -> panel
+  webServer.begin();
+  duckUp = true;
+
+  appState = ST_DUCK_RUNNING;
+  duckBusy = false;
+  duckStatusMsg = "Idle";
+  drawDuckScreen();
+  lastTick = millis();
+
+  // Auto-exec: fire the saved default payload as soon as the Duck comes up.
+  if (duckAutorun) {
+    String s = duckReadFile(DUCK_DEFAULT);
+    if (s.length()) { duckStartScript(s); drawDuckScreenStatus(); }
+  }
+}
+
+// Tear the WiFi Duck down and hand the web server back to the portal side.
+void stopDuck() {
+  if (duckUp) {
+    dnsServer.stop();
+    webServer.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    duckUp = false;
+  }
+  duckStop();
+  activeProject = PROJ_PORTAL;
 }
 
 // Register HTTP routes once. Handlers are safe to attach before the AP is up;
@@ -1192,15 +1680,78 @@ void registerRoutes() {
     }
   });
 
-  // Everything else -> the captive portal login page (no auth).
+  // ---- WiFi Duck control panel (operator-only; AP is WPA2-protected) ----
+  webServer.on("/duck/run", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    String s = webServer.arg("script");
+    duckWriteFile(DUCK_DEFAULT, s);   // remember the last run as the default
+    duckStartScript(s);
+    if (appState == ST_DUCK_RUNNING) drawDuckScreenStatus();
+    webServer.send(HTTP_CODE, "application/json", "{\"ok\":true}");
+  });
+  webServer.on("/duck/stop", []() {
+    if (!requireAuth()) return;
+    duckStop();
+    webServer.send(HTTP_CODE, "application/json", "{\"ok\":true}");
+  });
+  webServer.on("/duck/save", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    bool ok = duckWriteFile(duckPathFor(webServer.arg("name")), webServer.arg("script"));
+    webServer.send(HTTP_CODE, "application/json", String("{\"ok\":") + (ok ? "true" : "false") + "}");
+  });
+  webServer.on("/duck/load", []() {
+    if (!requireAuth()) return;
+    webServer.send(HTTP_CODE, "text/plain", duckReadFile(duckPathFor(webServer.arg("name"))));
+  });
+  webServer.on("/duck/runsaved", []() {       // run a saved payload directly (no load)
+    if (!requireAuth()) return;
+    String s = duckReadFile(duckPathFor(webServer.arg("name")));
+    if (s.length()) duckStartScript(s);
+    if (appState == ST_DUCK_RUNNING) drawDuckScreenStatus();
+    webServer.send(HTTP_CODE, "application/json", String("{\"ok\":") + (s.length() ? "true" : "false") + "}");
+  });
+  webServer.on("/duck/autorun", []() {         // toggle auto-exec on Duck start
+    if (!requireAuth()) return;
+    duckAutorun = (webServer.arg("on") == "1");
+    saveSettings();
+    webServer.send(HTTP_CODE, "application/json", String("{\"autorun\":") + (duckAutorun ? "true" : "false") + "}");
+  });
+  webServer.on("/duck/del", []() {
+    if (!requireAuth()) return;
+    LittleFS.remove(duckPathFor(webServer.arg("name")));
+    webServer.send(HTTP_CODE, "application/json", "{\"ok\":true}");
+  });
+  webServer.on("/duck/list", []() {
+    if (!requireAuth()) return;
+    sendDuckList();
+  });
+  webServer.on("/duck/status", []() {
+    if (!requireAuth()) return;
+    webServer.send(HTTP_CODE, "application/json",
+      String("{\"busy\":") + (duckBusy ? "true" : "false") +
+      ",\"done\":"  + String(duckLinesDone) +
+      ",\"total\":" + String(duckLinesTotal) +
+      ",\"hid\":"   + String(DUCK_HID ? "true" : "false") +
+      ",\"autorun\":" + String(duckAutorun ? "true" : "false") +
+      ",\"msg\":"   + jsonStr(duckStatusMsg) + "}");
+  });
+
+  // Everything else: the WiFi Duck panel while the Duck is active, otherwise
+  // the captive-portal login page.
   webServer.onNotFound([]() {
-    webServer.send(HTTP_CODE, "text/html", index());
+    if (activeProject == PROJ_DUCK) {
+      if (!requireAuth()) return;
+      webServer.send(HTTP_CODE, "text/html", duckPanel());
+    } else {
+      webServer.send(HTTP_CODE, "text/html", index());
+    }
   });
 }
 
 // Bring the captive-portal AP + DNS + web server up and switch to the
 // live dashboard.
 void startPortal() {
+  activeProject = PROJ_PORTAL;
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(APIP, APIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(cfgSsid.c_str());
@@ -1232,7 +1783,7 @@ void stopPortal() {
 
 // Small vector glyphs drawn to the left of each menu row. (cx,cy) is the icon
 // centre; `bg` is the row background, used for cut-outs.
-enum { IC_TOOLS, IC_CONFIG, IC_POWER, IC_PLAY, IC_INFO, IC_TRASH, IC_TOGGLE, IC_BRIGHT, IC_FLIP, IC_BACK };
+enum { IC_TOOLS, IC_CONFIG, IC_POWER, IC_PLAY, IC_INFO, IC_TRASH, IC_TOGGLE, IC_BRIGHT, IC_FLIP, IC_BACK, IC_DUCK };
 void drawMenuIcon(int t, int cx, int cy, uint16_t col, uint16_t bg) {
   switch (t) {
     case IC_TOOLS:                                       // sliders
@@ -1278,6 +1829,12 @@ void drawMenuIcon(int t, int cx, int cy, uint16_t col, uint16_t bg) {
     case IC_BACK:                                        // left arrow
       M5.Lcd.fillTriangle(cx - 4, cy, cx + 1, cy - 5, cx + 1, cy + 5, col);
       M5.Lcd.fillRect(cx + 1, cy - 1, 5, 2, col);
+      break;
+    case IC_DUCK:                                        // keyboard (WiFi Duck)
+      M5.Lcd.drawRoundRect(cx - 7, cy - 4, 14, 9, 2, col);
+      M5.Lcd.drawPixel(cx - 4, cy - 1, col); M5.Lcd.drawPixel(cx - 1, cy - 1, col);
+      M5.Lcd.drawPixel(cx + 2, cy - 1, col); M5.Lcd.drawPixel(cx + 4, cy - 1, col);
+      M5.Lcd.drawFastHLine(cx - 4, cy + 2, 8, col);      // space bar
       break;
   }
 }
@@ -1344,26 +1901,31 @@ void toastMsg(const char* msg) {
 }
 
 int currentMenuCount() {
-  if (appState == ST_MENU_MAIN)  return 3;  // Tools / Configuration / Exit
-  if (appState == ST_MENU_TOOLS) return 4;  // Start / Info / Reset / Back
-  return 5;                                 // Beep / LED / Brightness / Flip / Back
+  if (appState == ST_MENU_MAIN)   return 4;  // Evil Portal / WiFi Duck / Config / Exit
+  if (appState == ST_MENU_PORTAL) return 4;  // Start / Info / Reset / Back
+  if (appState == ST_MENU_DUCK)   return 3;  // Start Duck / Info / Back
+  return 5;                                  // Beep / LED / Brightness / Flip / Back
 }
 
 // Row geometry for the current menu state.
 void menuGeom(int &y0, int &rowH, int &rowInner) {
-  if (appState == ST_MENU_MAIN) { y0 = 46; rowH = 24; rowInner = 20; }
+  if (appState == ST_MENU_MAIN) { y0 = 32; rowH = 24; rowInner = 20; }
   else                          { y0 = 28; rowH = 20; rowInner = 17; }
 }
 
 // Label + icon for row i of the current menu.
 void menuItem(int i, String &label, int &icon) {
   if (appState == ST_MENU_MAIN) {
-    const char* L[] = {"Tools", "Configuration", "Exit"};
-    const int   I[] = {IC_TOOLS, IC_CONFIG, IC_POWER};
+    const char* L[] = {"Evil Portal", "WiFi Duck", "Configuration", "Exit"};
+    const int   I[] = {IC_TOOLS, IC_DUCK, IC_CONFIG, IC_POWER};
     label = L[i]; icon = I[i];
-  } else if (appState == ST_MENU_TOOLS) {
+  } else if (appState == ST_MENU_PORTAL) {
     const char* L[] = {"Start Portal", "Device Info", "Reset Captures", "Back"};
     const int   I[] = {IC_PLAY, IC_INFO, IC_TRASH, IC_BACK};
+    label = L[i]; icon = I[i];
+  } else if (appState == ST_MENU_DUCK) {
+    const char* L[] = {"Start Duck", "Device Info", "Back"};
+    const int   I[] = {IC_PLAY, IC_INFO, IC_BACK};
     label = L[i]; icon = I[i];
   } else {
     switch (i) {
@@ -1459,12 +2021,11 @@ void drawMenu(bool animate) {
   M5.Lcd.setTextDatum(ML_DATUM);
   M5.Lcd.setTextSize(2);
   M5.Lcd.setTextColor(TFT_WHITE);
-  const char* title = (appState == ST_MENU_MAIN) ? "MAIN MENU"
-                    : (appState == ST_MENU_TOOLS) ? "TOOLS" : "CONFIG";
+  const char* title = (appState == ST_MENU_MAIN)   ? "MAIN MENU"
+                     : (appState == ST_MENU_PORTAL) ? "EVIL PORTAL"
+                     : (appState == ST_MENU_DUCK)   ? "WIFI DUCK" : "CONFIG";
   M5.Lcd.drawString(title, 8, 13);
   drawBatteryAt(206, 6, TFT_WHITE, C_HDR_TOP);
-
-  if (appState == ST_MENU_MAIN) drawStatusStrip();
 
   if (animate) animateMenuIn(n);
   else for (int i = 0; i < n; i++) drawMenuRow(i, i == menuSel, 0);
@@ -1521,8 +2082,8 @@ void showDeviceInfo() {
     if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed()) break;
     delay(20);
   }
-  appState = ST_MENU_TOOLS;
-  menuSel = 1;
+  appState = infoReturn;      // back to whichever submenu opened this screen
+  menuSel = infoReturnSel;
   drawMenu(true);
 }
 
@@ -1550,7 +2111,7 @@ void doExit() {
     }
     if (M5.BtnB.wasPressed()) {
       appState = ST_MENU_MAIN;
-      menuSel = 2;
+      menuSel = 3;             // "Exit" is row 3 in the main menu
       drawMenu(true);
       return;
     }
@@ -1563,7 +2124,7 @@ void resetCaptures() {
   clearCaptures(true);  // also resets the lifetime counter
   previous = -1;        // force the dashboard to repaint if the portal is running
   toastMsg("Captures cleared");
-  appState = ST_MENU_TOOLS;
+  appState = ST_MENU_PORTAL;
   menuSel = 2;
   drawMenu(true);
 }
@@ -1581,20 +2142,25 @@ void flipScreen() {
 // Act on the highlighted item in the current menu.
 void selectCurrent() {
   if (appState == ST_MENU_MAIN) {
-    if (menuSel == 0)      { appState = ST_MENU_TOOLS;  menuSel = 0; drawMenu(true); }
-    else if (menuSel == 1) { appState = ST_MENU_CONFIG; menuSel = 0; drawMenu(true); }
+    if (menuSel == 0)      { appState = ST_MENU_PORTAL; menuSel = 0; drawMenu(true); }
+    else if (menuSel == 1) { appState = ST_MENU_DUCK;   menuSel = 0; drawMenu(true); }
+    else if (menuSel == 2) { appState = ST_MENU_CONFIG; menuSel = 0; drawMenu(true); }
     else                   { doExit(); }
-  } else if (appState == ST_MENU_TOOLS) {
+  } else if (appState == ST_MENU_PORTAL) {
     if (menuSel == 0)      { startPortal(); }           // -> ST_RUNNING
-    else if (menuSel == 1) { showDeviceInfo(); }
+    else if (menuSel == 1) { infoReturn = ST_MENU_PORTAL; infoReturnSel = 1; showDeviceInfo(); }
     else if (menuSel == 2) { resetCaptures(); }
     else                   { appState = ST_MENU_MAIN; menuSel = 0; drawMenu(true); }
+  } else if (appState == ST_MENU_DUCK) {
+    if (menuSel == 0)      { startDuck(); }             // -> ST_DUCK_RUNNING
+    else if (menuSel == 1) { infoReturn = ST_MENU_DUCK; infoReturnSel = 1; showDeviceInfo(); }
+    else                   { appState = ST_MENU_MAIN; menuSel = 1; drawMenu(true); }
   } else {  // ST_MENU_CONFIG -- toggles repaint just their own row (snappy, no slide)
     if (menuSel == 0)      { soundOn = !soundOn; saveSettings(); drawMenuRow(menuSel, true, 0); }
     else if (menuSel == 1) { ledBlinkOn = !ledBlinkOn; saveSettings(); drawMenuRow(menuSel, true, 0); }
     else if (menuSel == 2) { brightLevel = (brightLevel + 1) % 3; applyBrightness(); saveSettings(); drawMenuRow(menuSel, true, 0); }
     else if (menuSel == 3) { flipScreen(); }
-    else                   { appState = ST_MENU_MAIN; menuSel = 1; drawMenu(true); }
+    else                   { appState = ST_MENU_MAIN; menuSel = 2; drawMenu(true); }
   }
 }
 
@@ -1615,11 +2181,31 @@ void setup() {
   M5.begin(cfg);      // M5Unified: auto-detects the StickS3, brings up Display/Power/Speaker
   M5.Speaker.begin();            // enable the speaker amp (via the M5PM1 PMU)
 
+#if DUCK_HID
+  // Enumerate as a composite USB keyboard (+ CDC serial) for the WiFi Duck.
+  // The host only gets "typed" at once a payload is triggered from the panel.
+  DuckKbd.begin();
+  USB.begin();
+#endif
+
   loadSettings();     // restore persisted config (SSID, login, toggles, lifetime)
   if (!LittleFS.begin(true)) {   // true = format on first boot / mount failure
     // FS unavailable: keep running RAM-only (captures just won't persist).
   }
   loadCapturesFromFlash();  // restore collected credentials saved before power-off
+
+  // Seed a harmless example payload on first boot so the Duck panel isn't empty.
+  if (!LittleFS.exists(DUCK_DEFAULT)) {
+    duckWriteFile(DUCK_DEFAULT,
+      "REM Example payload - opens Run and types a line (Windows)\n"
+      "DELAY 600\n"
+      "GUI r\n"
+      "DELAY 400\n"
+      "STRING notepad\n"
+      "ENTER\n"
+      "DELAY 900\n"
+      "STRING Hello from Portal Evil HUEBR - WiFi Duck!\n");
+  }
   M5.Display.setRotation(screenRot);
   ledInit();          // no-op unless LED_PIN is set to a real GPIO
   applyBrightness();
@@ -1666,14 +2252,39 @@ void loop() {
     return;
   }
 
-  // Menu states (ST_MENU_MAIN / ST_MENU_TOOLS / ST_MENU_CONFIG)
+  if (appState == ST_DUCK_RUNNING) {
+    // Hold BtnB to stop the Duck (abort any running script) and return to menu.
+    if (M5.BtnB.pressedFor(800)) {
+      stopDuck();
+      appState = ST_MENU_MAIN;
+      menuSel = 1;
+      drawMenu(true);
+      return;
+    }
+    // BtnA: physical trigger -- run the saved default payload.
+    if (M5.BtnA.wasPressed() && !duckBusy) {
+      String s = duckReadFile(DUCK_DEFAULT);
+      if (s.length()) { duckStartScript(s); drawDuckScreenStatus(); }
+    }
+
+    duckTick();                        // advance the DuckyScript (non-blocking)
+    dnsServer.processNextRequest();
+    webServer.handleClient();
+
+    if ((millis() - lastTick) > TICK_TIMER) {   // refresh status + battery ~1/s
+      lastTick = millis();
+      drawDuckScreenStatus();
+    }
+    return;
+  }
+
+  // Menu states (ST_MENU_MAIN / ST_MENU_PORTAL / ST_MENU_DUCK / ST_MENU_CONFIG)
   handleMenuButtons();
 
-  // Keep the header battery (and the main-menu status strip) live without a
-  // full repaint. Guarded so it doesn't run if a selection just left the menu.
-  if (appState != ST_RUNNING && (millis() - lastTick) > TICK_TIMER) {
+  // Keep the header battery live without a full repaint. Guarded so it doesn't
+  // run if a selection just left the menu.
+  if ((millis() - lastTick) > TICK_TIMER) {
     lastTick = millis();
     drawBatteryAt(206, 6, TFT_WHITE, C_HDR_TOP);
-    if (appState == ST_MENU_MAIN) drawStatusStrip();
   }
 }

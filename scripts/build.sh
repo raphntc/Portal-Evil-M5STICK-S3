@@ -12,10 +12,15 @@
 # arduino-cli board id (e.g. esp32:esp32:m5stack_sticks3), set FQBN to it.
 # Until then we build against the generic ESP32-S3 dev module with the flash/
 # PSRAM/USB options that match M5Stack's PlatformIO profile for this device.
+#
+# USB MODE: built in USB-OTG (TinyUSB) mode (USBMode=default) so the WiFi Duck
+# project can enumerate as a USB keyboard (BadUSB). The Evil Portal ignores USB
+# mode, so this one build serves both projects. USBMode=hwcdc still compiles
+# (the Duck's typing just becomes a no-op).
 
 set -euo pipefail
 
-FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,USBMode=hwcdc"
+FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,USBMode=default"
 SKETCH_DIR="portal-evil-sticks3"
 SKETCH="$SKETCH_DIR/portal-evil-sticks3.ino"
 ESP32_URL="https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"

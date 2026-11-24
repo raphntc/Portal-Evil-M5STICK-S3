@@ -11,11 +11,17 @@
   arduino-cli board id (e.g. esp32:esp32:m5stack_sticks3), set $Fqbn to it.
   Until then we build against the generic ESP32-S3 dev module with the flash/
   PSRAM/USB options that match M5Stack's PlatformIO profile for this device.
+
+  USB MODE: we build in USB-OTG (TinyUSB) mode (USBMode=default) so the WiFi
+  Duck project can enumerate as a USB keyboard (BadUSB). The Evil Portal does
+  not care about USB mode, so this single build serves both projects. If you
+  only want the Evil Portal you may switch to USBMode=hwcdc; the firmware still
+  compiles (the Duck's typing just becomes a no-op).
 #>
 
 $ErrorActionPreference = "Stop"
 
-$Fqbn      = "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,USBMode=hwcdc"
+$Fqbn      = "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,USBMode=default"
 $SketchDir = "portal-evil-sticks3"
 $Sketch    = "$SketchDir/portal-evil-sticks3.ino"
 $Esp32Url  = "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"

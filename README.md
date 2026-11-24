@@ -64,6 +64,24 @@ Pick one from the **main menu** → `Evil Portal` or `WiFi Duck`. `Configuration
 
 ---
 
+## ✨ Feature highlights
+
+> [!CAUTION]
+> Every feature below is for **authorized security testing and classroom demonstration only**, against networks and devices you own or have **explicit written permission** to test. See the notices at the top of this README.
+
+### 🎣 Evil Portal
+- **Evil Twin (auto-clone):** `Evil Portal → Evil Twin` scans the nearby 2.4 GHz APs, lets you pick a target on the device screen, then brings the captive portal up on an **open AP cloning the target's exact SSID and channel** while sending deauth/disassoc frames at the real AP so its clients roam to the clone. The victim-facing page is a **router "security update"** that asks for the Wi-Fi password and shows the network name to build trust; a successful capture plays the evil laugh. *Deauth injection relies on the Arduino-ESP32 core exposing `ieee80211_raw_frame_sanity_check` + `esp_wifi_80211_tx` — verify on your core version.*
+- **On-screen QR loot retrieval:** on the live dashboard, tap the **front button (BtnA)** to show a QR code for the admin panel (`/admin`) and the capture export (`/export.csv`). Join the AP, scan, and pull the loot to a phone. The web server keeps serving while the QR is shown.
+- Login-protected dashboard, CSV/JSON export, persistent captures across reboots (unchanged).
+
+### 🐤 WiFi Duck — payload ecosystem
+- **Built-in payload library:** the control panel loads a categorized catalog (Windows / macOS / Linux / Text / Awareness / Examples) of **benign, classroom-style demos** — Load into the editor or Run with one click.
+- **Import / Export:** download every saved payload as one `.duck` bundle and restore it later (`/duck/export`, `/duck/import`).
+- **DuckyScript 3.0-lite:** `DEFINE #NAME value` constants, `VAR $x = value` variables (substituted inside `STRING`/`STRINGLN`), and randomized `DELAY 200-800` timing — on top of the existing `STRING`, `STRINGLN`, `DEFAULTDELAY`, `REPEAT`, modifiers and combos.
+- **On-device arming (Bash Bunny-style):** **tap the side button (BtnB)** to cycle the armed saved payload (shown on the LCD), **front button (BtnA)** to fire it, **hold the side button** to exit.
+
+---
+
 ## 🔁 What changed vs. the M5StickC Plus
 
 The display is the same 135×240 panel, so all of the on-screen UI (skull, menus, battery gauge, dashboard layout) is reused unchanged. Only the hardware-abstraction layer was rewritten:

@@ -1187,13 +1187,34 @@ void drawBloodDrip(int x, int top, int len) {
 
 // Blood oozing from the header line and running down the screen's side margins.
 // The drips stay in the left/right margins so they never cover menu content.
-void drawBloodFrame() {
+// `p` (0..1) is the drip-length fraction, so the frame can animate in.
+void drawBloodFrameP(float p) {
+  if (p < 0) p = 0; if (p > 1) p = 1;
   M5.Lcd.drawFastHLine(0, 26, 240, C_BLOOD_DK);
   M5.Lcd.drawFastHLine(0, 27, 240, C_BLOOD);
-  drawBloodDrip(2,   28, 66);
-  drawBloodDrip(5,   28, 30);
-  drawBloodDrip(234, 28, 42);
-  drawBloodDrip(237, 28, 88);
+  drawBloodDrip(2,   28, (int)(66 * p));
+  drawBloodDrip(5,   28, (int)(30 * p));
+  drawBloodDrip(234, 28, (int)(42 * p));
+  drawBloodDrip(237, 28, (int)(88 * p));
+}
+void drawBloodFrame() { drawBloodFrameP(1.0f); }
+
+// Animate the blood running down the side margins (used on menu transitions).
+void animateBloodFrame() {
+  for (int f = 1; f <= 6; f++) { drawBloodFrameP(f / 6.0f); delay(20); }
+}
+
+// A small white skull with glowing red eyes for the menu header.
+void drawHeaderSkull(int cx, int cy) {
+  M5.Lcd.fillCircle(cx, cy - 1, 6, C_BONE);               // cranium
+  M5.Lcd.fillRoundRect(cx - 4, cy + 3, 8, 4, 1, C_BONE);  // jaw
+  M5.Lcd.fillCircle(cx - 2, cy - 1, 2, C_SOCKET);         // eye sockets
+  M5.Lcd.fillCircle(cx + 2, cy - 1, 2, C_SOCKET);
+  M5.Lcd.fillCircle(cx - 2, cy - 1, 1, C_EYE);            // glowing eyes
+  M5.Lcd.fillCircle(cx + 2, cy - 1, 1, C_EYE);
+  M5.Lcd.drawFastVLine(cx - 2, cy + 3, 4, C_HDR_BOT);     // teeth gaps
+  M5.Lcd.drawFastVLine(cx,     cy + 3, 4, C_HDR_BOT);
+  M5.Lcd.drawFastVLine(cx + 2, cy + 3, 4, C_HDR_BOT);
 }
 
 // Quick blood-splatter flash over the screen (used when a victim is captured).
@@ -2611,18 +2632,20 @@ void drawMenu(bool animate) {
   M5.Lcd.drawFastHLine(0, 26, 240, C_CARD_SH);           // header drop shadow
   M5.Lcd.setTextDatum(ML_DATUM);
   M5.Lcd.setTextSize(2);
+  drawHeaderSkull(14, 12);
   M5.Lcd.setTextColor(TFT_WHITE);
   const char* title = (appState == ST_MENU_MAIN)   ? "MAIN MENU"
                      : (appState == ST_MENU_PORTAL) ? "EVIL PORTAL"
                      : (appState == ST_MENU_DUCK)   ? "WIFI DUCK" : "CONFIG";
-  M5.Lcd.drawString(title, 8, 13);
+  M5.Lcd.drawString(title, 28, 13);
   drawBatteryAt(206, 6, TFT_WHITE, C_HDR_TOP);
 
   if (animate) animateMenuIn(n);
   else for (int i = 0; i < n; i++) drawMenuRow(i, i == menuSel, 0);
 
   drawMenuFooter(n);
-  drawBloodFrame();   // blood running down the side margins
+  if (animate) animateBloodFrame();   // blood runs down the margins as the menu opens
+  else drawBloodFrame();
 }
 
 // Move the highlight to a new row: repaint just the two affected rows (snappy)
@@ -2637,6 +2660,14 @@ void moveSelection(int oldSel) {
   delay(45);
   drawMenuRow(menuSel, true, 0);                             // settle (covers flash)
   updateMenuCounter(n);
+}
+
+// Subtle breathing glow on the highlighted row, toggled on the idle menu tick.
+void pulseSelection() {
+  int y0, rowH, rowInner; menuGeom(y0, rowH, rowInner);
+  int y = y0 + menuSel * rowH;
+  static bool on = false; on = !on;
+  M5.Lcd.drawRoundRect(8, y, 224, rowInner, 5, on ? C_BLOOD_HI : C_ACC_HI);
 }
 
 // Blocking info screen; returns to the Tools menu on any button press.
@@ -2913,5 +2944,6 @@ void loop() {
   if ((millis() - lastTick) > TICK_TIMER) {
     lastTick = millis();
     drawBatteryAt(206, 6, TFT_WHITE, C_HDR_TOP);
+    pulseSelection();   // breathing glow on the highlighted row
   }
 }

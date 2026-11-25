@@ -14,6 +14,8 @@ _Built for Wi-Fi security awareness, live demos, and research._
   <img src="https://img.shields.io/badge/Board-M5StickS3-E60012?style=for-the-badge" alt="Board: M5StickS3">
   <img src="https://img.shields.io/badge/Built%20with-Arduino-00979D?style=for-the-badge&logo=arduino&logoColor=white" alt="Built with Arduino">
   <img src="https://img.shields.io/badge/Purpose-Educational-2ea44f?style=for-the-badge" alt="Purpose: Educational">
+  <img src="https://img.shields.io/badge/Projects-Evil%20Portal%20%2B%20WiFi%20Duck-8b0000?style=for-the-badge" alt="Projects: Evil Portal + WiFi Duck">
+  <img src="https://img.shields.io/badge/Theme-Horror%20%2F%20Blood-b11212?style=for-the-badge" alt="Theme: Horror / Blood">
 </p>
 
 **Author:** [@raphntc](https://github.com/raphntc/) &nbsp;·&nbsp; **License:** [MIT](LICENSE)
@@ -41,7 +43,26 @@ Este projeto **não é afiliado, endossado ou suportado pelo Facebook/Meta** nem
 
 ---
 
-## 📖 About
+## 📑 Table of Contents
+
+- [📖 About](#about)
+- [🧰 The two projects](#projects)
+- [✨ Highlights](#highlights)
+- [🔁 What changed vs. the M5StickC Plus](#changes)
+- [✨ Full feature list](#features)
+- [🔐 Admin access — default login](#login)
+- [🛠️ Hardware](#hardware)
+- [📦 Requirements](#requirements)
+- [🚀 Installation / Flashing](#install)
+- [▶️ Usage](#usage)
+- [🐤 WiFi Duck (BadUSB)](#wifiduck)
+- [⚙️ Configuration](#config)
+- [✅ Not yet verified on hardware](#unverified)
+- [🙌 Credits](#credits)
+
+---
+
+## <a id="about"></a>📖 About
 
 This is the **M5StickS3 port** of [Portal Evil HUEBR](https://github.com/raphntc/Portal-Evil-M5STICK-C-PLUS), originally written for the M5StickC Plus. Wi-Fi honeypots are deceptive wireless networks that masquerade as legitimate hotspots: they lure users with free internet, then present a fake “sign-in” page to harvest data. This project recreates that scenario on cheap, pocket-sized hardware so students, educators, and security professionals can **see the technique in action** and learn to recognize and defend against it.
 
@@ -51,7 +72,7 @@ This port also adds a **second project**: a **WiFi Duck** (BadUSB). The ESP32-S3
 
 ---
 
-## 🧰 The two projects
+## <a id="projects"></a>🧰 The two projects
 
 | | 🎣 **Evil Portal** | 🐤 **WiFi Duck (BadUSB)** |
 | --- | --- | --- |
@@ -64,7 +85,7 @@ Pick one from the **main menu** → `Evil Portal` or `WiFi Duck`. `Configuration
 
 ---
 
-## ✨ Feature highlights
+## <a id="highlights"></a>✨ Highlights
 
 > [!CAUTION]
 > Every feature below is for **authorized security testing and classroom demonstration only**, against networks and devices you own or have **explicit written permission** to test. See the notices at the top of this README.
@@ -82,7 +103,7 @@ Pick one from the **main menu** → `Evil Portal` or `WiFi Duck`. `Configuration
 
 ---
 
-## 🔁 What changed vs. the M5StickC Plus
+## <a id="changes"></a>🔁 What changed vs. the M5StickC Plus
 
 The display is the same 135×240 panel, so all of the on-screen UI (skull, menus, battery gauge, dashboard layout) is reused unchanged. Only the hardware-abstraction layer was rewritten:
 
@@ -104,7 +125,7 @@ The display is the same 135×240 panel, so all of the on-screen UI (skull, menus
 
 ---
 
-## ✨ Features
+## <a id="features"></a>✨ Full feature list
 
 - 🩸 **Horror "blood" theme** on the device screens: a dark blood-red palette, blood running down the screen edges, the boot skull **weeping blood** with a **blood-wash** finale, and a **blood splatter** on every capture. The operator web dashboard (`/admin`, `/settings`) matches, with blood dripping under its header. The victim sign-in page is left untouched (it must look legit).
 - 📶 Open Wi-Fi access point with a configurable SSID (default `Wi-Fi Gratis`).
@@ -125,7 +146,7 @@ The display is the same 135×240 panel, so all of the on-screen UI (skull, menus
 
 ---
 
-## 🔐 Admin Access — default login
+## <a id="login"></a>🔐 Admin access — default login
 
 > [!IMPORTANT]
 > The operator dashboard (`/admin`) and all of its actions are protected by a login. **Default credentials:**
@@ -141,12 +162,12 @@ Open the dashboard while connected to the AP: `http://172.0.0.1/admin`
 
 ---
 
-## 🛠️ Hardware
+## <a id="hardware"></a>🛠️ Hardware
 
 - **M5StickS3** — ESP32-S3-PICO-1-N8R8, 1.14″ 135×240 LCD (ST7789P3), ES8311 speaker, BMI270 IMU, M5PM1 PMU, 250 mAh battery.
 - USB-C cable for flashing and power.
 
-## 📦 Requirements
+## <a id="requirements"></a>📦 Requirements
 
 - [Arduino IDE](https://www.arduino.cc/en/software) (or Arduino CLI / PlatformIO).
 - **ESP32 board support** (arduino-esp32 core) installed via Boards Manager.
@@ -154,7 +175,7 @@ Open the dashboard while connected to the AP: `http://172.0.0.1/admin`
 
 ---
 
-## 🚀 Installation / Flashing
+## <a id="install"></a>🚀 Installation / Flashing
 
 ### 🧰 Option A — Arduino IDE (build from source)
 
@@ -187,7 +208,7 @@ The build writes to the **`firmware/`** folder:
 
 ---
 
-## ▶️ Usage
+## <a id="usage"></a>▶️ Usage
 
 1. On power-on, the device plays the laughing-skull splash (~5 s) and opens the **main menu** — it does **not** start the portal automatically.
 2. Navigate with the two buttons: **BtnB** moves the highlight, **BtnA** selects. The main menu picks the project: **Evil Portal** or **WiFi Duck**.
@@ -214,7 +235,7 @@ The build writes to the **`firmware/`** folder:
 
 ---
 
-## 🐤 WiFi Duck (BadUSB)
+## <a id="wifiduck"></a>🐤 WiFi Duck (BadUSB)
 
 The WiFi Duck turns the Stick into a **Wi-Fi-triggered USB keyboard**. Plug the device into the target computer's USB port, then drive it remotely from your phone/laptop.
 
@@ -265,14 +286,14 @@ Everything on a single line is pressed together and released at once. The keyboa
 
 ---
 
-## ⚙️ Configuration
+## <a id="config"></a>⚙️ Configuration
 
 Portal text/branding are `#define` values near the top of
 [`portal-evil-sticks3.ino`](portal-evil-sticks3/portal-evil-sticks3.ino): `SSID_NAME`, `SUBTITLE`, `POST_TITLE`, `POST_BODY`, `ADMIN_USER_DEF`, `ADMIN_PASS_DEF`, `MAX_CAPTURES`, `LED_PIN` (set to a real GPIO to enable an external capture LED), and the WiFi Duck AP defaults `DUCK_SSID_DEF` / `DUCK_PASS_DEF`. Runtime settings (beep, speaker volume, brightness, screen flip, portal SSID, login, auto-refresh, **WiFi Duck SSID / password / auto-exec**) are changed live from the on-device menu or the sectioned `/settings` page, and persisted to flash (NVS).
 
 ---
 
-## ✅ Not yet verified on hardware
+## <a id="unverified"></a>✅ Not yet verified on hardware
 
 This port was adapted from the C Plus source using M5Stack's M5StickS3 documentation. The display layout, web stack, and settings carry over directly, but the following should be confirmed on a real device and tuned if needed:
 
@@ -287,7 +308,9 @@ This port was adapted from the C Plus source using M5Stack's M5StickS3 documenta
 
 ---
 
-- [raphntc](https://github.com/raphntc) — M5StickC Plus port, further improvements, and this M5StickS3 port
+## <a id="credits"></a>🙌 Credits
+
+- [raphntc](https://github.com/raphntc) — author and developer
 
 ---
 

@@ -1228,6 +1228,22 @@ void bloodSplat() {
   delay(120);
 }
 
+// -------- Horror UI sound effects (menu navigation) --------
+// A stepped frequency sweep -> an eerie glissando instead of a flat beep.
+// Gated by soundOn and short enough to keep navigation feeling snappy.
+void sfxSweep(int f0, int f1, int durMs) {
+  if (!soundOn) return;
+  const int steps = 6;
+  int per = durMs / steps; if (per < 4) per = 4;
+  for (int i = 0; i <= steps; i++) {
+    M5.Speaker.tone(f0 + (f1 - f0) * i / steps, per + 6);
+    delay(per);
+  }
+}
+void sfxMove()   { sfxSweep(250, 165, 32);  }  // low tick as the highlight moves
+void sfxSelect() { sfxSweep(300, 120, 110); }  // ominous drop on select / confirm
+void sfxBack()   { sfxSweep(150, 240, 100); }  // rising groan when backing out
+
 // Boot finale: blood pours from the top of the screen and pools at the bottom.
 // Draw-only (append), so it layers over the final skull frame without flicker.
 void bloodWash(int durMs) {
@@ -2651,6 +2667,7 @@ void drawMenu(bool animate) {
 // Move the highlight to a new row: repaint just the two affected rows (snappy)
 // with a quick white "pop" flash on the newly selected one.
 void moveSelection(int oldSel) {
+  sfxMove();
   int n = currentMenuCount();
   int y0, rowH, rowInner; menuGeom(y0, rowH, rowInner);
   drawMenuRow(oldSel, false, 0);
@@ -2763,6 +2780,7 @@ void flipScreen() {
 
 // Act on the highlighted item in the current menu.
 void selectCurrent() {
+  sfxSelect();
   if (appState == ST_MENU_MAIN) {
     if (menuSel == 0)      { appState = ST_MENU_PORTAL; menuSel = 0; drawMenu(true); }
     else if (menuSel == 1) { appState = ST_MENU_DUCK;   menuSel = 0; drawMenu(true); }
@@ -2797,6 +2815,7 @@ void handleMenuButtons() {
   if (M5.BtnB.pressedFor(600)) {                 // hold = back to the parent menu
     if (!backArmed) {
       backArmed = true;
+      sfxBack();
       if      (appState == ST_MENU_PORTAL) { appState = ST_MENU_MAIN; menuSel = 0; drawMenu(true); }
       else if (appState == ST_MENU_DUCK)   { appState = ST_MENU_MAIN; menuSel = 1; drawMenu(true); }
       else if (appState == ST_MENU_CONFIG) { appState = ST_MENU_MAIN; menuSel = 3; drawMenu(true); }
